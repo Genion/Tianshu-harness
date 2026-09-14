@@ -42,6 +42,7 @@ import type { SettingsBlockId, SettingsDraft, SettingsEnv } from './settings-mod
 import { splitModelRef } from './settings-model.js'
 import type { SettingsSaveResult } from './settings-flow.js'
 import { resolveLeanDefaults } from '../config/runtime-lean.js'
+import { contractModels } from '../config/contract-models.js'
 
 /** Runtime side-effects the panel cannot do by itself. */
 export interface SettingsHooks {
@@ -118,7 +119,7 @@ export function loadSettingsEnv(): SettingsEnv {
   const cfg = loadConfig()
   const models: SettingsEnv['models'] = []
   for (const [provider, p] of Object.entries(cfg.provider.providers)) {
-    for (const m of p.models) {
+    for (const m of contractModels(p)) {
       models.push({ provider, id: m.id, alias: m.alias, supportsVision: m.supportsVision === true })
     }
   }
@@ -196,7 +197,7 @@ export function saveSettings(
             const parts = splitModelRef(ref)
             if (!parts) continue
             const provider = cfg.provider.providers[parts.provider]
-            const model = provider?.models.find(m => m.id === parts.model || m.alias === parts.model)
+            const model = provider ? contractModels(provider).find(m => m.id === parts.model || m.alias === parts.model) : undefined
             // 只在覆盖值与磁盘现状不同时写入
             if (model && (model.supportsVision === true) !== value) {
               setModelSupportsVision(parts.provider, model.id, value)

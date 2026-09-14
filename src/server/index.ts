@@ -224,7 +224,14 @@ export async function startServer(
   routes: Record<string, RouteHandler>,
   apiToken?: string,
   opts: StartServerOptions = {},
-): Promise<{ close: (cb?: (err?: Error) => void) => void; port: number }> {
+): Promise<{
+  close: (cb?: (err?: Error) => void) => void
+  /** 立即关闭 keep-alive 空闲连接（Node ≥18.2）。SSE 清场（closeAll 的
+   *  done+end）后 socket 转入空闲态、仍阻塞 server.close(cb)——实测要等 5s
+   *  keepAliveTimeout，关停链用它在 close() 之后即时回收（见 serve.ts）。 */
+  closeIdleConnections: () => void
+  port: number
+}> {
   const router = createRouter(routes)
 
   // CORS：只反射已知 webview 来源（见 cors.ts——SSE/图片路由同源反射）。
@@ -351,7 +358,11 @@ export async function startServer(
       resolve()
     })
   })
-  return { close: (cb) => server.close(cb), port: boundPort }
+  return {
+    close: (cb) => server.close(cb),
+    closeIdleConnections: () => server.closeIdleConnections(),
+    port: boundPort,
+  }
 }
 
 const BODY_TOO_LARGE = Symbol('body-too-large')

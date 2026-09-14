@@ -303,6 +303,29 @@ describe('createCoordinatorReviewDeps', () => {
     assert.equal(salvaged[1]?.confidence, 'high')
   })
 
+  it('F1+: failed 形态的 salvage 同样透传（2026-09-13：门槛只认 blocked 时 9 条发现全部没送达）', async () => {
+    const coordinator: ReviewCoordinator = {
+      delegate: async () => run([]),
+      delegateBatch: async () => run([worker({
+        status: 'failed',
+        summary: 'Worker report JSON was malformed; salvaged 9/12 candidate(s) as findings',
+        findings: [
+          { claim: 'D1 root 发布流水线绕过 mobile 闸门族', evidence: 'scripts/build-*.sh', confidence: 'high' },
+          { claim: 'D2 ② 的真值是硬编码常量', evidence: 'check-mobile-wiring.js', confidence: 'medium' },
+        ],
+        evidenceStatus: 'unverified',
+        failureReason: 'json_parse',
+      })]),
+    }
+
+    const deps = createCoordinatorReviewDeps(coordinator)
+    const result = await deps.spawnSquadron({ files: ['desktop/scripts/a.ts'], crossModule: false, isFix: false })
+
+    assert.deepEqual(result.findings, [], 'salvaged findings 不参与 blocking 判定')
+    assert.equal(result.infraFailures?.[0]?.kind, 'json')
+    assert.equal(result.infraFailures?.[0]?.salvagedFindings?.length, 2, 'failed 形态同样要透传')
+  })
+
   it('threads onActivity into DelegationRequest for all four spawns (review-gate UI visibility)', async () => {
     const captured: DelegationRequest[] = []
     const coordinator: ReviewCoordinator = {

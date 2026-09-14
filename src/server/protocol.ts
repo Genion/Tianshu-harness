@@ -57,6 +57,11 @@ export type SessionEventType =
   | 'tool_result'
   | 'turn_complete'
   | 'phase'
+  // Zen Mode（禅模式）相位镜像：data: { phase:'zen'|'full', reason?, armed,
+  // zenTurns }。run 开始与每次晋升各发一次。**消费端待实现**：桌面端当前未订阅
+  // zen_phase（2026-09-13 核查 desktop/ 零命中；TUI 徽章走 zenBadgeProvider 回调，
+  // 不经过此事件）——补桌面消费或改此注释二选一，勿再用现在时描述。
+  | 'zen_phase'
   | 'checkpoint'
   | 'approval_required'
   | 'approval_resolved'
@@ -151,6 +156,28 @@ export interface ResolvedDomainRecord {
   reason: 'keyword' | 'fallback'
 }
 
+/**
+ * Zen Mode（禅模式）相位镜像——SessionRecord 与 `zen_phase` 事件的共用形状。
+ * 'zen' = 主控工具面收窄到读面（读专注开局）；'full' = 全量工具面。
+ *
+ * reason 刻意用宽 string 而非窄联合：本文件是零依赖 leaf，不引 agent 层的
+ * ZenPromoteReason；未知值由消费端兜底，加新晋升通道不必改协议。
+ *
+ * 用 type 而非 interface（本文件其余契约都是 interface）：只有 type alias 与匿名
+ * 对象类型带隐式 index signature，interface 没有——写成 interface 就赋不进
+ * `append(session, type, data: Record<string, unknown>)`，也无法直接当
+ * Record 传给归一函数。
+ */
+export type ZenPhaseMirror = {
+  phase: 'zen' | 'full'
+  /** 晋升原因（'tool' | 'timeout' | 'triage' | 'user'）；arm（进入禅）时缺省。 */
+  reason?: string
+  /** 本会话是否 arm 过（含已晋升）；false = 禅未启用或未进入。 */
+  armed: boolean
+  /** 禅相位内已消耗的用户 turn 数（步长预算口径）。 */
+  zenTurns: number
+}
+
 export interface SessionRecord {
   id: string
   status: SessionStatus
@@ -159,6 +186,14 @@ export interface SessionRecord {
   cwd: string
   title?: string
   currentPhase?: string
+  /**
+   * 禅相位镜像——**建连补发**用。`zen_phase` 事件只在 run 起点 arm 与每次晋升
+   * 时发，长会话里它早已滑出 /stream 的回放窗口，而重连是从 `?since=` 续读的：
+   * 不补发则「切走再切回」的客户端徽章必然丢失（等下一次 run 才回来）。
+   * 与 currentPhase 无关——后者是执行阶段（thinking/tool），本字段是工具面宽窄。
+   * 随 record 落 index.json，sidecar 重启后经 rehydrate 的 `...rec` 自动恢复。
+   */
+  zenPhaseMirror?: ZenPhaseMirror
   lastSeq: number
   error?: string
   /**

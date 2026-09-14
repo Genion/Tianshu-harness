@@ -29,6 +29,7 @@ import { debugLog } from '../utils/debug.js'
 import { hasActionIntent, hasWriteActionIntent, turnUsedOnlyReadTools, DELIVERY_SIGNAL_RE } from './action-intent-detector.js'
 import { b1ReadOnlyLimitForWindow, b2TurnLimitForWindow, isB2ConvergingRecently } from './window-thresholds.js'
 import { markIdle } from './stall-observer.js'
+import { recordInterruption } from './interrupt-marker.js'
 
 // ── Types re-exported for deps interface ──
 
@@ -207,6 +208,10 @@ export interface TurnOrchestratorDeps {
   }>
   prewarmRecentReads: () => Promise<void>
   runPostSession: (callbacks: AgentCallbacks) => Promise<void>
+  /** 中止收尾：inline 有界 drain 持久化（工具结果不能因 Ctrl+C 丢，abort-tool-hang 契约）。 */
+  drainPersist: () => Promise<void>
+  /** 中止收尾：postSession 进后台链，run() 不等（见 AgentLoop.schedulePostSessionDetached）。 */
+  schedulePostSessionDetached: (callbacks: AgentCallbacks) => void
   recordProviderOutcome: (ok: boolean) => void
 
   // === Sub-controllers ===
@@ -275,6 +280,10 @@ export interface TurnOrchestratorDeps {
 
   // === Abort reason (watchdog vs user) ===
   getAbortReason: () => string | undefined
+
+  // === 打断留痕（任务 4）===
+  /** 用户 Stop 时保留 partial + 追加 [interrupted] 标记的开关（config `agent.interruptMarker` / env 双通道，默认开）。 */
+  getInterruptMarkerEnabled: () => boolean
 
   // === Resource sensor ===
   getLatestResourceSnapshot: () => ResourceSensorSnapshot | null
@@ -419,6 +428,39 @@ export class TurnOrchestrator {
   }
 
   /**
+   * 四个 abort 出口共用的收尾（此前出口 1/2 不跑 postSession、3/4 阻塞等 postSession，
+   * 且只有 1/4 记 stop reason——统一为同一序列）：
+   *   留痕/撤回 → recordStop → inline drain → postSession detached → onAbort。
+   * onAbort 之后 run() 立即 settle：宿主（TUI notifyRunSettled / 服务端 running）不再等
+   * consolidation / essence-gate 等 LLM 侧路。
+   */
+  private async finishInterrupted(
+    callbacks: AgentCallbacks,
+    p: { turn: number; assistantResponded: boolean; userMessageConsumed: boolean; partialText: string },
+  ): Promise<void> {
+    const abortTag = this.deps.getAbortReason()
+    // 用户打断：保留 user 消息与 partial 文本，追加 `[interrupted]` 标记
+    // （对齐 Codex handle_task_abort / Claude Code 的留痕）；watchdog 中止或
+    // 开关关闭时保持旧行为（撤回未答的 user 消息）。
+    recordInterruption(this.deps, {
+      partialText: p.partialText,
+      assistantResponded: p.assistantResponded,
+      userMessageConsumed: p.userMessageConsumed,
+      abortTag,
+      markerEnabled: this.deps.getInterruptMarkerEnabled(),
+    })
+    this.recordStop({
+      source: abortTag?.includes('watchdog') ? 'watchdog-stall' : 'user-interrupt',
+      turn: p.turn,
+      voluntary: false,
+      ...(abortTag !== undefined && { detail: abortTag }),
+    })
+    try { await this.deps.drainPersist() } catch { /* best-effort */ }
+    this.deps.schedulePostSessionDetached(callbacks)
+    callbacks.onAbort(abortTag)
+  }
+
+  /**
    * Apply batch result state to the orchestrator deps. Extracted so both
    * the normal post-tool path and the watchdog-rescue path share the same
    * state-mutation logic without duplication.
@@ -450,6 +492,9 @@ export class TurnOrchestrator {
     // LLM compact replace the message list). When true, skip removeLastMessage
     // because the user message no longer exists at the top of the stack.
     let userMessageConsumed = false
+    // 本轮 streamedText 是否已随 addAssistantBlocks 入历史（出口 3/4 的 partial 判据：
+    // 已持久化的文本不能再作为 partial 追加，否则同一段文本重复落历史）。
+    let turnTextPersisted = false
 
     // TTSR retry governor: cap how many times each stream rule may abort+retry
     // within a single run(). Without a cap, a model that keeps emitting a
@@ -515,15 +560,7 @@ export class TurnOrchestrator {
             this._rescuedFromWatchdog = false
             debugLog('[turn-orch] skipping abort after watchdog rescue')
           } else {
-            if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
-            const abortTag = this.deps.getAbortReason()
-            this.recordStop({
-              source: abortTag?.includes('watchdog') ? 'watchdog-stall' : 'user-interrupt',
-              turn,
-              voluntary: false,
-              ...(abortTag !== undefined && { detail: abortTag }),
-            })
-            callbacks.onAbort(abortTag)
+            await this.finishInterrupted(callbacks, { turn, assistantResponded, userMessageConsumed, partialText: '' })
             return
           }
         }
@@ -564,14 +601,14 @@ export class TurnOrchestrator {
             'compaction',
           )
           if (compactionResult.shouldAbort) {
-            if (!assistantResponded && !compactionResult.userMessageConsumed) this.deps.removeLastMessage()
-            callbacks.onAbort(this.deps.getAbortReason())
+            await this.finishInterrupted(callbacks, { turn, assistantResponded, userMessageConsumed: compactionResult.userMessageConsumed, partialText: '' })
             return
           }
           if (compactionResult.userMessageConsumed) userMessageConsumed = true
         }
 
         this.deps.state.streamedText = ''
+        turnTextPersisted = false
         this.deps.state.lastPrewarmAt = 0
         let _tb = Date.now()
         this.deps.getHeartbeat()?.tick('prewarm')
@@ -761,6 +798,7 @@ export class TurnOrchestrator {
             ) {
               attempt++
               this.deps.state.streamedText = ''
+              turnTextPersisted = false
               turnTextAccum = ''
               turnThinkingAccum = ''
               pendingFlush = ''
@@ -871,21 +909,15 @@ export class TurnOrchestrator {
         const latestTurnCache = cacheHistory.length > 0 ? cacheHistory[cacheHistory.length - 1] : null
 
         if (signal?.aborted) {
-          // P0: skip addAssistantBlocks — partial blocks from an aborted
-          // stream must not pollute the message list and break prefix cache.
           if (this.deps.state.streamedText.length > 0) this.deps.addUsage({ output_tokens: Math.ceil(this.deps.state.streamedText.length / 4) })
-          if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
-          // runPostSession is best-effort cleanup — its failure must not cause
-          // the outer catch to double-delete an unrelated message.
-          try { await this.deps.runPostSession(callbacks) } catch { /* best-effort */ }
-          callbacks.onAbort(this.deps.getAbortReason())
+          await this.finishInterrupted(callbacks, { turn, assistantResponded, userMessageConsumed, partialText: this.deps.state.streamedText })
           return
         }
 
         if (streamError) {
           // Abort is a user action, not a provider fault — don't cool the provider.
           if ((streamError as Error).name !== 'AbortError') this.deps.recordProviderOutcome(false)
-          if (collectedBlocks.length > 0 && (streamError as Error).name !== 'AbortError') { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true }
+          if (collectedBlocks.length > 0 && (streamError as Error).name !== 'AbortError') { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true; turnTextPersisted = true }
           if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
           callbacks.onError(streamError)
           return
@@ -902,7 +934,7 @@ export class TurnOrchestrator {
           collectedBlocks.push({ type: 'text', text: this.deps.state.streamedText })
         }
 
-        if (collectedBlocks.length > 0) { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true }
+        if (collectedBlocks.length > 0) { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true; turnTextPersisted = true }
 
         // max_output_tokens on text-only turns: accept partial output instead of
         // escalating. The model rarely continues coherently — it usually restarts
@@ -1470,20 +1502,13 @@ export class TurnOrchestrator {
       }
     } catch (err) {
       this.deps.resetEvidence()
-      if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
       if ((err as Error).name === 'AbortError') {
-        // 停止原因落盘（不走 onPhaseChange——onAbort 已负责 UI 渲染，避免双条）。
-        // watchdog 触发的 abort 与用户 Esc 用 abortReason tag 区分。
-        const abortTag = this.deps.getAbortReason()
-        this.recordStop({
-          source: abortTag?.includes('watchdog') ? 'watchdog-stall' : 'user-interrupt',
-          turn: this.deps.state.runLoopTurn,
-          voluntary: false,
-          ...(abortTag !== undefined && { detail: abortTag }),
+        await this.finishInterrupted(callbacks, {
+          turn: this.deps.state.runLoopTurn, assistantResponded, userMessageConsumed,
+          partialText: turnTextPersisted ? '' : this.deps.state.streamedText,
         })
-        await this.deps.runPostSession(callbacks)
-        callbacks.onAbort(abortTag)
       } else {
+        if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
         this.recordStop({
           source: 'stream-error',
           turn: this.deps.state.runLoopTurn,

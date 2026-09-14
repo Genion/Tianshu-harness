@@ -100,6 +100,7 @@ export const EXTENDED_TOOLS = [
   'create_document',
   'create_spreadsheet',
   'create_image',
+  'generate_image',
   'create_presentation',
   'create_pdf',
   'export_file',

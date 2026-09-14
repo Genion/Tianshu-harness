@@ -46,7 +46,10 @@ const USAGE = [
  */
 function defaultOpen(path: string): void {
   const { cmd, args } = buildOpenPathCommand(path)
-  spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref()
+  // windowsHide 必带：detached 在 Windows 上让子进程拥有自己的 console window，
+  // 隐藏窗口不能靠「已分离」来默认（openPath 目标虽是 GUI 程序，但 detached spawn
+  // 仍会分配控制台）。见 architecture-guards 的 spawn 守卫基线。
+  spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
 }
 
 export function runLogsCLI(args: readonly string[], deps: LogsCliDeps): LogsCliResult {

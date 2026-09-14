@@ -10,6 +10,16 @@ const NOW = new Date(2026, 6, 30, 12, 0, 0).getTime() // 本地正午 → 今日
 
 const tick = (ms = 10) => new Promise(r => setTimeout(r, ms))
 
+/** 条件轮询：负载下扫盘/快照解析耗时不定，固定 tick 是 flaky 源（D 波遗留 b）。
+ *  正向断言一律等到条件成立（有界），负向窗口才用固定 tick。 */
+async function waitFor(cond: () => boolean, timeoutMs = 3_000, label = '条件'): Promise<void> {
+  const start = Date.now()
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error(`waitFor 超时（${timeoutMs}ms）：${label}`)
+    await tick(10)
+  }
+}
+
 async function makeSessionsRoot(rows: Array<Record<string, unknown>>): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'cache-src-'))
   const dir = join(root, 'session-1')
@@ -51,7 +61,7 @@ test('首帧返回 loading，扫描完成后回调重画并给出三周期聚合
     assert.equal(first.aggregates, null)
     assert.equal(first.loading, true)
 
-    await tick(60)
+    await waitFor(() => updates >= 1 && source.data('30d').aggregates !== null, 3_000, '首次扫盘完成')
     assert.ok(updates >= 1)
 
     const ready = source.data('30d')
@@ -80,7 +90,7 @@ test('TTL 内不重复扫盘，invalidate 后重新扫', async () => {
       now: () => NOW,
     })
     source.data()
-    await tick(60)
+    await waitFor(() => roots > 0, 3_000, '首次扫盘')
     const afterFirst = roots
     source.data()
     source.data()
@@ -89,8 +99,7 @@ test('TTL 内不重复扫盘，invalidate 后重新扫', async () => {
 
     source.invalidate()
     source.data()
-    await tick(60)
-    assert.ok(roots > afterFirst)
+    await waitFor(() => roots > afterFirst, 3_000, 'invalidate 后重扫')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -110,7 +119,7 @@ test('官方快照映射：平台 / 仅余额 / 不可用', async () => {
 
     const platform = make({ source: 'platform', todayCost: 1.5, monthCost: 20, balance: '3.21', currency: 'CNY' })
     platform.data()
-    await tick(30)
+    await waitFor(() => platform.data().official.status === 'ready', 3_000, 'platform 快照就绪')
     assert.deepEqual(
       { ...platform.data().official },
       { status: 'ready', source: 'platform', todayCost: 1.5, monthCost: 20, balance: '3.21', currency: 'CNY', hint: undefined },
@@ -118,12 +127,12 @@ test('官方快照映射：平台 / 仅余额 / 不可用', async () => {
 
     const balance = make({ source: 'balance', balance: '9.9', currency: 'CNY' })
     balance.data()
-    await tick(30)
+    await waitFor(() => balance.data().official.source === 'balance', 3_000, 'balance 快照就绪')
     assert.equal(balance.data().official.source, 'balance')
 
     const none = make({ source: 'none', hint: '未登录 DeepSeek 平台' })
     none.data()
-    await tick(30)
+    await waitFor(() => none.data().official.status === 'unavailable', 3_000, 'none 快照就绪')
     assert.equal(none.data().official.status, 'unavailable')
     assert.match(none.data().official.hint ?? '', /未登录/)
   } finally {
@@ -143,7 +152,7 @@ test('官方查询抛错时降级为不可用提示，不冒泡到渲染', async
       now: () => NOW,
     })
     source.data()
-    await tick(30)
+    await waitFor(() => source.data().official.status === 'unavailable', 3_000, '错误降级')
     const official = source.data().official
     assert.equal(official.status, 'unavailable')
     assert.match(official.hint ?? '', /boom/)
@@ -162,7 +171,7 @@ test('扫描失败（目录不存在）不卡在 loading', async () => {
     now: () => NOW,
   })
   source.data()
-  await tick(40)
+  await waitFor(() => source.data().loading === false, 3_000, '缺失目录扫盘收尾')
   const data = source.data()
   assert.equal(data.loading, false)
   assert.ok(data.aggregates)

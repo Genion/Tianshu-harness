@@ -114,6 +114,9 @@ import { fetchOfficialUsage } from './cache/deepseek-official-usage.js'
 import type { CacheStatus } from './tui/status-types.js'
 import { TuiPerfMonitor, isTuiPerfEnabled } from './tui/engine/perf-monitor.js'
 import { runTuiShutdownSequence } from './tui/engine/shutdown-sequence.js'
+import { contractModels } from './config/contract-models.js'
+import { disambiguateKeyPrefix, parseModelRef, findModelOwner, findModelInKey } from './config/provider-keys.js'
+import { tryResolveCredentialKey } from './api/factory.js'
 
 // ── CLI args ───────────────────────────────────────────────────
 
@@ -441,39 +444,51 @@ async function main() {
     // 显式 --provider/--model 恒优先；defaultModel 指向的 provider/model 不存在
     // 时逐级回退到原行为，不让一处配置错误把 headless 整个卡死。
     const defaultModelRef = cfg.agent.defaultModel
-    const defaultModelParts = defaultModelRef && defaultModelRef.includes(':')
-      ? {
-          provider: defaultModelRef.slice(0, defaultModelRef.indexOf(':')),
-          modelId: defaultModelRef.slice(defaultModelRef.indexOf(':') + 1),
-        }
-      : null
-    const preferredProvider = defaultModelParts && cfg.provider.providers[defaultModelParts.provider]
+    // 统一走 parseModelRef：手切两段认不出 `provider:keyId:modelId` 三段式；再经
+    // disambiguateKeyPrefix 消解「中间段是 keyId 还是模型 id 自带冒号」（`ollama:qwen3:32b`
+    // 的 qwen3 非 key id → 还原完整 modelRef）——漏后者会静默取错模型与凭据。
+    const modelParts = (r: string | undefined) => r ? disambiguateKeyPrefix(cfg.provider.providers, parseModelRef(r)) : null
+    const defaultModelParts = modelParts(defaultModelRef)
+    const requestedParts = modelParts(requestedModel)
+    const preferredProvider = defaultModelParts?.provider && cfg.provider.providers[defaultModelParts.provider]
       ? defaultModelParts.provider
       : undefined
     const provName = requestedProvider ?? preferredProvider ?? cfg.provider.default
     const prov = cfg.provider.providers[provName]
     if (!prov) { process.stderr.write(`Provider not configured: ${provName}. Run: rivet config setup <provider>\n`); process.exit(1) }
-    const key = prov.apiKey ?? process.env[prov.apiKeyEnv ?? '']
-    if (!key) { process.stderr.write(`API key not set. Export ${prov.apiKeyEnv ?? 'API_KEY'} or run: rivet config setup ${prov.name}\n`); process.exit(1) }
-
-    // provName 若来自 defaultModel 前缀，modelId 才是同一份配置的另一半；
-    // 显式 --provider 换了服务商时不沿用 defaultModel 的 modelId（跨商无意义）。
-    const defaultModelId = provName === defaultModelParts?.provider ? defaultModelParts.modelId : undefined
-    const wantedModelId = requestedModel ?? defaultModelId
-    const matchedModel = wantedModelId
-      ? prov.models.find(m => m.id === wantedModelId || m.alias === wantedModelId)
+    // 解析顺序：**先定位模型归属哪个 key，再从该 key 取凭据**（与 server 侧
+    // resolveModelSpec 同语义）。反过来先取凭据会让「模型属第二把 key」的场景拿第一把
+    // key 去请求（实测 `--model mockprov:model-two` 曾发出 Bearer sk-KEY-ONE）。
+    // pinnedKeyId 仅在显式钉 key（三段式）时存在；显式 --model 不带 keyId 时不得继承
+    // agent.defaultModel 的 keyId——模型归属才是唯一判据，跨 provider 更不沿用 modelId。
+    const pinnedKeyId = requestedParts
+      ? requestedParts.keyId
+      : (provName === defaultModelParts?.provider ? defaultModelParts.keyId : undefined)
+    const defaultModelId = provName === defaultModelParts?.provider ? defaultModelParts.modelRef : undefined
+    const wantedModelId = requestedParts ? requestedParts.modelRef : defaultModelId
+    const providerPool = contractModels(prov)
+    const owner = wantedModelId
+      ? (pinnedKeyId ? findModelInKey(prov, pinnedKeyId, wantedModelId) : findModelOwner(prov, wantedModelId))
       : undefined
-    if (wantedModelId && !matchedModel) {
-      // 与 bootstrap.createAgentRuntime 同形：模型名失配时静默换档，会让「配了
-      // 多模态模型却看不到图片」完全无迹可循（兜底档常常是同名前缀的纯文本档）。
-      // headless 每次进程只解析一次，不需要去重告警。
+    const model = owner?.model
+      ?? (wantedModelId ? providerPool.find(m => m.id === wantedModelId || m.alias === wantedModelId) : undefined)
+      ?? providerPool[0]!
+    // 模型名失配告警（合 origin/main）：静默换档会让「配了多模态模型却看不到图片」
+    // 完全无迹可循（兜底档常是同名前缀的纯文本档）。headless 每进程只解析一次，无需去重。
+    if (wantedModelId && !owner && !providerPool.some(m => m.id === wantedModelId || m.alias === wantedModelId)) {
       process.stderr.write(
         `[model] 配置的模型 "${wantedModelId}" 不在 provider "${provName}" 下，`
-        + `已回退到 "${prov.models[0]!.id}"（该档不支持视觉时图片将无法被识别）。`
-        + `可选：${prov.models.map(m => m.id).join(', ')}\n`,
+        + `已回退到 "${model.id}"（该档不支持视觉时图片将无法被识别）。`
+        + `可选：${providerPool.map(m => m.id).join(', ')}\n`,
       )
     }
-    const model = matchedModel ?? prov.models[0]!
+    // 凭据：模型所属 key 配了任一凭据槽 → 只用它；否则回退 provider 级（未迁移
+    // provider 的 owner 为 null，行为与迁移前一致）。
+    const ownerKey = owner?.owner
+    const key = ownerKey && (ownerKey.keyRef || ownerKey.apiKey || ownerKey.apiKeyEnv)
+      ? (tryResolveCredentialKey({ name: prov.name, keyRef: ownerKey.keyRef, apiKey: ownerKey.apiKey, apiKeyEnv: ownerKey.apiKeyEnv }) ?? '')
+      : (prov.apiKey ?? process.env[prov.apiKeyEnv ?? ''])
+    if (!key) { process.stderr.write(`API key not set. Export ${prov.apiKeyEnv ?? 'API_KEY'} or run: rivet config setup ${prov.name}\n`); process.exit(1) }
     const sessionId = crypto.randomUUID()
 
     // --budget N (default 100) is the hard turn cap for goal mode; it doubles as
@@ -623,7 +638,12 @@ async function main() {
           auth: undefined,
         }))
         const session = new SessionContext()
-        const agent = new AgentLoop({ ...agentCfg, toolRegistry, maxTurns: headlessMaxTurns }, session, process.cwd())
+        // one-shot 显式不启用 zen：无人值守会话没有 /fast 通道，读面收窄对脚本化
+        // 任务也无意义。此处钉住 zen 而不是依赖 createAgentConfig「恰好」不透传——
+        // 后者一旦把 zen 并入返回白名单，one-shot 就会静默 arm（且无用户可解锁）。
+        // 注：未设 headless: true 是另一件事——它还会联动 tool-pipeline 的审批自动
+        // 放行/拒绝分支，属独立改动，不在此处顺手改。
+        const agent = new AgentLoop({ ...agentCfg, toolRegistry, zen: undefined, maxTurns: headlessMaxTurns }, session, process.cwd())
         headlessAgentRef.current = agent
         agent.config.coordinatorRef = () => headlessCoordinator
 
@@ -819,7 +839,7 @@ async function main() {
   // ── Build TuiApp ─────────────────────────────────────────────
   // 初始模型名以运行时实际模型为准（tui/initial-status.ts），避免默认模型重启后显示不一致。
   const { modelName, currentModel } = resolveInitialModelName({
-    models: ctx.provider.models,
+    models: contractModels(ctx.provider),
     runtimeModelId: ctx.agent.config.promptEngine.getModel(),
     defaultModelRef: ctx.config.agent.defaultModel,
   })
@@ -1160,7 +1180,7 @@ async function main() {
       return buildCockpitSnapshot({
         agent: ctx.agent,
         session: ctx.session,
-        model: ctx.provider.models[0]?.alias ?? ctx.provider.models[0]?.id ?? 'unknown',
+        model: contractModels(ctx.provider)[0]?.alias ?? contractModels(ctx.provider)[0]?.id ?? 'unknown',
         cacheHitRate: ctx.session.getRecentTurnHitRate(3) ?? ctx.session.getCacheHitRate(),
         cost: metrics?.cost ?? 0,
         mcpManager: ctx.refs.mcpManager,
@@ -1240,7 +1260,7 @@ async function main() {
       // 只显示用户已保存的 provider（userSaved）——内置预设舰队不进切换器。
       for (const [provName, prov] of Object.entries(ctx?.config.provider.providers ?? {})) {
         if (!prov.userSaved) continue
-        for (const m of prov.models) {
+        for (const m of contractModels(prov)) {
           entries.push({
             id: m.id,
             alias: m.alias ?? m.id,
@@ -1670,7 +1690,7 @@ async function main() {
             // 当前会话正用被删的模型组——迁移到默认 provider 首个模型。
             // switchAgentRuntime 会先验证模型和凭证；失败时不应提前 abort 当前 agent。
             const prov = fresh.provider.providers[fresh.provider.default]
-            const modelAlias = prov?.models[0]?.alias ?? prov?.models[0]?.id
+            const modelAlias = prov && (contractModels(prov)[0]?.alias ?? contractModels(prov)[0]?.id)
             if (!modelAlias) {
               runtime = { needed: true, switched: false, error: '默认 provider 没有可用模型' }
             } else {
@@ -1794,7 +1814,7 @@ async function main() {
       if (ctx) {
         ctx.config.provider = fresh.provider
         const prov = fresh.provider.providers[fresh.provider.default]
-        const modelAlias = prov?.models[0]?.alias ?? prov?.models[0]?.id
+        const modelAlias = prov && (contractModels(prov)[0]?.alias ?? contractModels(prov)[0]?.id)
         if (modelAlias) {
           try { ctx.agent.abort() } catch { /* idle */ }
           const res = switchAgentRuntime(ctx, modelAlias)
@@ -1894,7 +1914,7 @@ async function main() {
     // 按 input/output/cacheRead/cacheWrite/reasoning 五档精确计算。无 pricing 时回退 0。
     const providers = ctx.agent.config.allProviders ?? {}
     const providerName = ctx.agent.config.providerName
-    const modelId = ctx?.provider.models[0]?.id
+    const modelId = ctx ? contractModels(ctx.provider)[0]?.id : undefined
     const pricing = findModelPricing(providers, providerName, modelId)
     const cost = pricing ? computeUsageCost(total, pricing).total : 0
     const maxTokens = ctx.agent.config.contextWindow ?? currentModel?.contextWindow ?? 0
@@ -2077,6 +2097,9 @@ async function main() {
 
   // 中断收尾窗口靠它对着真相校验，而不是只信 notifyRunSettled 那一条信号。
   app.setAgentRunningProbe(() => ctx?.agent.isRunning() === true)
+
+  // Zen Mode（禅模式）相位徽章：读面收窄期间状态栏常驻「禅」，晋升后消失。
+  app.setZenBadgeProvider(() => (ctx?.agent.zenController.isZen ? '禅' : undefined))
 
   // ── Wire abort ───────────────────────────────────────────────
   app.onAbort(() => {

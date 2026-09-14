@@ -26,7 +26,7 @@
  * an injectable {@link ResolvedEnvDeps} so the pure resolution logic is unit
  * testable on any host without touching the real registry or spawning a shell.
  */
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { win32 as winPath, posix as posixPath } from 'node:path'
 import { loadConfig } from '../config/manager.js'
@@ -314,10 +314,86 @@ function realDeps(): ResolvedEnvDeps {
 
 /** Host-level resolution is expensive (spawns reg/shell) — cache it per process. */
 let _cachedHost: HostEnvResult | null = null
+let _prewarm: Promise<void> | null = null
 
 /** Reset the host-resolution cache (tests only). */
 export function resetResolvedEnvCache(): void {
   _cachedHost = null
+  _prewarm = null
+}
+
+/** Async twin of {@link readRegistryEnvReal}: same reg.exe, same hive, same parser. */
+function readRegistryEnvAsync(scope: 'machine' | 'user'): Promise<Record<string, string>> {
+  const hive = scope === 'machine'
+    ? 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'
+    : 'HKCU\\Environment'
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+  const regExe = systemRoot + '\\System32\\reg.exe'
+  return new Promise((resolve) => {
+    try {
+      execFile(regExe, ['query', hive], { timeout: 3000, encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout) => resolve(err || typeof stdout !== 'string' ? {} : parseRegQuery(stdout)))
+    } catch {
+      resolve({})
+    }
+  })
+}
+
+/** Async twin of {@link dumpLoginShellEnvReal}. */
+function dumpLoginShellEnvAsync(): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      const shell = process.env.SHELL || '/bin/bash'
+      execFile(shell, ['-lic', 'command env'], { timeout: 3000, encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+        (err, stdout) => resolve(err || typeof stdout !== 'string' ? '' : stdout))
+    } catch {
+      resolve('')
+    }
+  })
+}
+
+/**
+ * 异步预热宿主环境缓存（桌面性能阶段 3，2026-09-13）。
+ *
+ * `getResolvedEnv()` 的首次调用要 `spawnSync` reg.exe（两个 hive）/ 登录 shell，
+ * 在 sidecar 首秒里它由 `GET /environment` 触发，同步卡住主线程几百 ms——同一
+ * 时刻并发的 `/config/*`、`/git/branches` 全部排队（首秒所有路由 300–600ms 的
+ * 真正来源）。这里用异步 spawn 跑同一批探针，结果喂给同一个纯解析器
+ * `resolveHostEnv`，产物与同步路径逐字相同；listen 后立即点火，通常在 UI 首批
+ * 请求到达前落定。期间若同步路径先到，各自算各自的，结果一致，后到者不覆盖。
+ */
+export function prewarmResolvedEnv(): Promise<void> {
+  if (_cachedHost) return Promise.resolve()
+  if (_prewarm) return _prewarm
+  _prewarm = (async () => {
+    const platform = process.platform
+    let reg: Record<'machine' | 'user', Record<string, string>> = { machine: {}, user: {} }
+    let dump = ''
+    if (platform === 'win32') {
+      const [machine, user] = await Promise.all([readRegistryEnvAsync('machine'), readRegistryEnvAsync('user')])
+      reg = { machine, user }
+    } else {
+      // 与同步路径同条件：PATH 看起来完整时不 dump 登录 shell（resolveHostEnv 自己判 looksShort，
+      // 这里只是把可能用到的输入准备好——预先 dump 一次代价 ≤3s 且异步，可接受）。
+      const sep = ':'
+      const base = process.env[findPathKey(process.env)] ?? process.env.PATH ?? ''
+      if (looksShort(splitPath(base, sep))) dump = await dumpLoginShellEnvAsync()
+    }
+    if (_cachedHost) return
+    _cachedHost = resolveHostEnv({
+      platform,
+      baseEnv: process.env,
+      readRegistryEnv: (scope) => reg[scope],
+      dumpLoginShellEnv: () => dump,
+      exists: existsSync,
+    })
+  })().catch(() => { /* 预热失败无害：同步路径照旧兜底 */ }).finally(() => { _prewarm = null })
+  return _prewarm
+}
+
+/** 宿主环境缓存是否已就位（测试/诊断用）。 */
+export function isResolvedEnvWarm(): boolean {
+  return _cachedHost !== null
 }
 
 /**

@@ -307,6 +307,68 @@ describe('probeProvider', () => {
     await server.close()
     server = undefined
   })
+
+  it('sent no Authorization header when probing keyless (Ollama/vLLM style)', async () => {
+    let sawAuthorization: string | undefined
+    server = await startServer((req, res) => {
+      if (req.url === '/v1/models') {
+        sawAuthorization = req.headers.authorization
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ data: [{ id: 'local-model' }] }))
+        return
+      }
+      res.writeHead(404).end()
+    })
+
+    const report = await probeProvider({ baseUrl: server.baseUrl, skipCompletion: true })
+    assert.equal(report.modelsOk, true)
+    assert.equal(sawAuthorization, undefined, 'keyless 探测不得携带 Authorization 头')
+    await server.close()
+    server = undefined
+  })
+
+  it('reports a structured modelListError with code for 401 auth failures', async () => {
+    server = await startServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid api key' }))
+    })
+
+    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'bad', skipCompletion: true })
+    assert.equal(report.modelsOk, false)
+    assert.equal(report.modelListError?.code, 'auth-failed')
+    assert.equal(report.modelListError?.status, 401)
+    assert.ok(report.modelListError?.message.includes('Authentication failed'), report.modelListError?.message)
+    await server.close()
+    server = undefined
+  })
+
+  it('reports a structured modelListError with quota code for FreeTierOnly 403', async () => {
+    server = await startServer((_req, res) => {
+      res.writeHead(403, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ code: 'AllocationQuota.FreeTierOnly', message: 'Free quota exhausted.' }))
+    })
+
+    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-ok', skipCompletion: true })
+    assert.equal(report.modelsOk, false)
+    assert.equal(report.modelListError?.code, 'quota')
+    assert.equal(report.modelListError?.status, 403)
+    await server.close()
+    server = undefined
+  })
+
+  it('reports a structured modelListError with http-404 for a 404 /models', async () => {
+    server = await startServer((_req, res) => {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end('{"error":"not found"}')
+    })
+
+    const report = await probeProvider({ baseUrl: server.baseUrl, skipCompletion: true })
+    assert.equal(report.modelsOk, false)
+    assert.equal(report.modelListError?.code, 'http-404')
+    assert.equal(report.modelListError?.status, 404)
+    await server.close()
+    server = undefined
+  })
 })
 
 describe('vision real-test (视觉真测)', () => {
@@ -496,7 +558,9 @@ describe('dashscope native models enrichment (E3)', () => {
 
     const baseUrl = server.baseUrl.replace(/\/v1$/, '/compatible-mode/v1')
     const report = await probeProvider({ baseUrl, apiKey: 'sk-x', providerName: 'dashscope' })
-    assert.deepEqual(report.models, ['qwen-new-max', 'qwen-vl-new'])
+    // issue #8 §7.2：生图模型（response_modality 含 Image）不再丢弃——否则百炼用户
+    // 在模型列表里根本看不到它，也就无法在生图槽里选它。音频模型仍应被过滤。
+    assert.deepEqual(report.models, ['qwen-new-max', 'qwen-image-3', 'qwen-vl-new'])
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, true)
     assert.deepEqual(report.modelInfos?.['qwen-new-max'], {
@@ -504,7 +568,8 @@ describe('dashscope native models enrichment (E3)', () => {
       maxOutputTokens: 131_072,
       maxReasoningTokens: 262_144,
     })
-    assert.ok(!('qwen-image-3' in (report.modelInfos ?? {})))
+    // 生图模型现在会被保留，且带上标记；下游（chat 选择器）据此隐藏它。
+    assert.deepEqual(report.modelInfos?.['qwen-image-3'], { supportsImageGen: true })
     // 补全仍走 compatible-mode 路径（/api/v1 没有 OpenAI 风格 chat）。
     assert.ok(seenUrls.some(u => u === '/compatible-mode/v1/chat/completions'))
     await server.close()
@@ -557,8 +622,14 @@ describe('dashscope native models enrichment (E3)', () => {
 
     const baseUrl = server.baseUrl.replace(/\/v1$/, '/compatible-mode/v1')
     const report = await probeProvider({ baseUrl, apiKey: 'sk-x', providerName: 'dashscope', skipCompletion: true })
-    assert.deepEqual(report.models, ['qwen-page1-text', 'qwen-page2-text'])
-    assert.equal(pages.length, 2)
+    // 核心判据不变：满页与否按**原始条数**（过滤前）算——第一页 200 条就必须翻页，
+    // 哪怕过滤后只剩 1 条。issue #8 §7.2 之后生图模型不再被过滤，于是 199 个 img-*
+    // 也留在列表里（这恰好让"按原始数分页"更直观：它们现在都数得出来）。
+    assert.equal(pages.length, 2, '满页仍必须触发翻页')
+    assert.ok(report.models.includes('qwen-page1-text'))
+    assert.ok(report.models.includes('qwen-page2-text'))
+    assert.ok(report.models.includes('img-0'), '生图模型保留在列表里（issue #8 §7.2）')
+    assert.equal(report.models.length, 201, '199 个生图模型 + 两页的文本模型')
     await server.close()
     server = undefined
   })

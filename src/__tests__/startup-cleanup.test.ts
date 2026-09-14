@@ -23,7 +23,7 @@ describe('cleanupOrphanedTmpFiles', () => {
   })
 
   it('deletes orphaned .tmp files matching the fs-atomic pattern', () => {
-    const oldTmp = join(tmpDir, 'data.json.a1b2c3d4.tmp')
+    const oldTmp = join(tmpDir, 'data.json.rivet-atomic-a1b2c3d4.tmp')
     writeFileSync(oldTmp, '{}')
     backdate(oldTmp, 7_200_000) // 2 hours ago
 
@@ -33,7 +33,7 @@ describe('cleanupOrphanedTmpFiles', () => {
   })
 
   it('does not delete recent .tmp files', () => {
-    const recentTmp = join(tmpDir, 'data.json.e5f6a7b8.tmp')
+    const recentTmp = join(tmpDir, 'data.json.rivet-atomic-e5f6a7b8.tmp')
     writeFileSync(recentTmp, '{}')
 
     const cleaned = cleanupOrphanedTmpFiles([tmpDir])
@@ -56,6 +56,18 @@ describe('cleanupOrphanedTmpFiles', () => {
     assert.ok(existsSync(wrongLen))
   })
 
+  it('does not delete user files matching the OLD unmarked pattern (issue #125)', () => {
+    // 旧形态 `<任意名>.<8位hex>.tmp` 与用户自己的临时文件同形——清理它会静默删用户数据。
+    // 实现已收紧为只认 `.rivet-atomic-<8hex>.tmp`，此用例钉住该安全语义。
+    const oldPattern = join(tmpDir, 'notes.deadbeef.tmp')
+    writeFileSync(oldPattern, 'user data')
+    backdate(oldPattern, 7_200_000)
+
+    const cleaned = cleanupOrphanedTmpFiles([tmpDir])
+    assert.equal(cleaned, 0)
+    assert.ok(existsSync(oldPattern), '旧形态必须存活（否则用户的同名临时文件会被静默删除）')
+  })
+
   it('handles non-existent directories gracefully', () => {
     const cleaned = cleanupOrphanedTmpFiles(['/nonexistent/path'])
     assert.equal(cleaned, 0)
@@ -67,8 +79,8 @@ describe('cleanupOrphanedTmpFiles', () => {
     mkdirSync(dir1)
     mkdirSync(dir2)
 
-    const f1 = join(dir1, 'x.11111111.tmp')
-    const f2 = join(dir2, 'y.22222222.tmp')
+    const f1 = join(dir1, 'x.rivet-atomic-11111111.tmp')
+    const f2 = join(dir2, 'y.rivet-atomic-22222222.tmp')
     writeFileSync(f1, '')
     writeFileSync(f2, '')
     backdate(f1, 7_200_000)

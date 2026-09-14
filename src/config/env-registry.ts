@@ -3,8 +3,8 @@
  *
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；
  * description 字段人工维护，重新生成时按 name 保留。
- * 最后生成：2026-09-12T06:23:38.653Z
- * 共 173 个变量。
+ * 最后生成：2026-09-14T07:04:54.717Z
+ * 共 181 个变量。
  *
  * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。
  * 当源码中新增 RIVET_* 引用但注册表未同步时，
@@ -23,6 +23,18 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: EnvRegistryEntry[] = [
+  {
+    name: 'RIVET_ACCOUNT_ANON_KEY',
+    defaultHint: 'DEFAULT_PUBLISHABLE_KEY',
+    files: ['auth/account.ts'],
+    description: '',
+  },
+  {
+    name: 'RIVET_ACCOUNT_API',
+    defaultHint: 'DEFAULT_ACCOUNT_API',
+    files: ['auth/account.ts'],
+    description: '',
+  },
   {
     name: 'RIVET_ADAPTIVE_MEMORY',
     defaultHint: '',
@@ -182,7 +194,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_CONFIG_PATH',
     defaultHint: '',
-    files: ['tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-v4pro-retirement.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', '__tests__/bootstrap.test.ts'],
+    files: ['tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/generate-image.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/image-gen-model-routes.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/image-gen-model.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-keys-file-migration.test.ts', 'config/__tests__/provider-keys-store.test.ts', 'config/__tests__/provider-keys.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', '__tests__/bootstrap.test.ts'],
     description: '',
   },
   {
@@ -260,7 +272,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DEBUG',
     defaultHint: '',
-    files: ['utils/debug.ts', 'tui/engine/__tests__/image-tool.test.ts', 'api/__tests__/openai-client-tool-stream-log.test.ts', 'agent/__tests__/deliver-task.test.ts', 'agent/__tests__/tool-pipeline.test.ts'],
+    files: ['utils/debug.ts', 'tui/engine/__tests__/image-tool.test.ts', 'api/__tests__/openai-client-tool-stream-log.test.ts', 'agent/__tests__/deliver-task.test.ts', 'agent/__tests__/interrupt-marker.test.ts', 'agent/__tests__/tool-pipeline.test.ts'],
     description: '',
   },
   {
@@ -278,7 +290,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DEBUG_RENDER',
     defaultHint: '',
-    files: ['server/session-routes.ts'],
+    files: ['server/session-persistence.ts', 'server/session-routes.ts'],
     description: '',
   },
   {
@@ -321,6 +333,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_DESKTOP_SESSION_DIR',
     defaultHint: 'join(desktopDir(',
     files: ['config/paths.ts'],
+    description: '',
+  },
+  {
+    name: 'RIVET_DISK_WARN_MB',
+    defaultHint: '',
+    files: ['utils/disk-space.ts', 'utils/__tests__/disk-space.test.ts'],
     description: '',
   },
   {
@@ -368,7 +386,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_FETCH_PIN',
     defaultHint: '',
-    files: ['tools/net/http-fetch.ts'],
+    files: ['tools/net/http-fetch.ts', 'tools/net/__tests__/http-fetch.test.ts', 'mcp/oauth/__tests__/request-security.test.ts'],
     description: '',
   },
   {
@@ -422,7 +440,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_HOME',
     defaultHint: '',
-    files: ['tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/updater.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/deepseek-platform-client.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/worker-session.test.ts'],
+    files: ['tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/updater.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/deepseek-platform-client.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/worker-session.test.ts'],
     description: '',
   },
   {
@@ -468,6 +486,18 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
+    name: 'RIVET_INTERRUPT_MARKER',
+    defaultHint: '',
+    files: ['config/interrupt-marker-config.ts', 'agent/__tests__/interrupt-marker.test.ts'],
+    description: '打断留痕开关，默认开；设 0/false/off/no 关闭（等价 config agent.interruptMarker=false）——关闭时用户 Stop 撤回未答的 user 消息（旧行为）',
+  },
+  {
+    name: 'RIVET_ISSUE_',
+    defaultHint: '',
+    files: ['tools/__tests__/bash-windows-smoke.test.ts'],
+    description: '',
+  },
+  {
     name: 'RIVET_JOB_MAX_MS',
     defaultHint: '\'\'',
     files: ['tools/job-store.ts'],
@@ -507,6 +537,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_MAX_EVENTS',
     defaultHint: '',
     files: ['server/session-manager.ts', 'server/__tests__/session-history-page.test.ts'],
+    description: '',
+  },
+  {
+    name: 'RIVET_MCP_LIVE',
+    defaultHint: '',
+    files: ['server/__tests__/mcp-presets.test.ts'],
     description: '',
   },
   {
@@ -596,7 +632,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_NO_SYSTEM_PROXY',
     defaultHint: '',
-    files: ['tui/__tests__/updater.test.ts', 'tools/net/proxy-resolver.ts'],
+    files: ['tui/__tests__/updater.test.ts', 'tools/net/proxy-resolver.ts', 'mcp/oauth/__tests__/request-security.test.ts'],
     description: '',
   },
   {
@@ -614,7 +650,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_OAUTH_PORT',
     defaultHint: '',
-    files: ['mcp/oauth/connector.ts'],
+    files: ['mcp/oauth/connector.ts', 'mcp/oauth/__tests__/request-security.test.ts'],
     description: '',
   },
   {
@@ -686,7 +722,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_PROFILE',
     defaultHint: '',
-    files: ['main.ts', 'config/profile.ts', 'config/__tests__/config-watcher.test.ts'],
+    files: ['main.ts', 'config/profile.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts'],
     description: '',
   },
   {
@@ -723,6 +759,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_RENDER_VERIFY',
     defaultHint: '',
     files: ['agent/create-runtime-hooks.ts', 'agent/deliver-task.ts'],
+    description: '',
+  },
+  {
+    name: 'RIVET_REPLAY_COMPACT',
+    defaultHint: '',
+    files: ['server/replay-compaction.ts', 'server/__tests__/session-history-page.test.ts', 'server/__tests__/session-replay-compaction.test.ts'],
     description: '',
   },
   {
@@ -812,8 +854,14 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_SERVE_TIMING',
     defaultHint: '',
-    files: ['server/serve.ts'],
-    description: '',
+    files: ['server/serve-timing.ts', 'server/serve.ts', 'server/session-routes.ts'],
+    description: 'sidecar 启动阶段时间线 `[serve-timing] phase=<name> +<ms>`（start / pro-module / rehydrate / routes / listen / warm-start / plugins-warm / serve-agent-loaded / mcp）。未设：生产默认开、ephemeral（测试）默认关；`0` 全关；`1` 强开并附带 serve-agent import 耗时与小回放的 replay 计时等冗长行。',
+  },
+  {
+    name: 'RIVET_SERVE_WARM_DELAY_MS',
+    defaultHint: '',
+    files: ['server/serve-timing.ts'],
+    description: 'sidecar listen 后到预热（agent 装配 chunk import + 插件快照）点火的延迟毫秒数；`0` = listen 后立即（旧行为）。首个会话的 createAgent 无论如何都会即时拉响预热，本值只影响空闲启动期与首批 UI 请求抢 CPU 的窗口。',
   },
   {
     name: 'RIVET_SERVER_TOKEN',
@@ -824,7 +872,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_SESSION_DIR',
     defaultHint: '',
-    files: ['server/__tests__/cache-routes.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-routes.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'config/paths.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/switch-agent-session.test.ts'],
+    files: ['server/__tests__/cache-routes.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-routes.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'config/paths.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/switch-agent-session.test.ts'],
     description: '',
   },
   {
@@ -944,7 +992,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_TYPECHECK_SHARE',
     defaultHint: '',
-    files: ['lsp/client.ts'],
+    files: ['tools/bash.ts', 'lsp/client.ts'],
     description: '',
   },
   {

@@ -19,6 +19,9 @@ import { claimHasFileEvidence, countClaimsByStatus, evaluatePromotion, canRecall
 const MAX_CONSUMERS_PER_CLAIM = 50
 const MAX_ACTIVE_CLAIMS = 50
 const DEFAULT_CHECKPOINT_EVERY_EVENTS = 500
+/** 短暂性错误的梯度重试上限。8 × 250ms ≈ 2s 窗口——覆盖 AV/EDR/OneDrive
+ *  的秒级文件锁；再大只是让永久错误多空转，再小削弱自愈窗口。 */
+const DEFAULT_MAX_TRANSIENT_WRITE_RETRIES = 8
 
 export type ContextClaimEvent =
   | { type: 'claim_proposed'; eventId: string; createdAt: number; seq?: number; claim: ContextClaim }
@@ -29,6 +32,11 @@ export type ContextClaimEvent =
 export interface ContextClaimStoreOptions {
   /** Auto-checkpoint after this many incremental JSONL events. Defaults to 500. */
   checkpointEveryEvents?: number
+  /**
+   * 短暂性写错误（EACCES/EPERM/EBUSY 及未知码）的梯度重试上限——连续失败
+   * 达到上限才转永久停链，成功即清零。默认 8。测试注入小值可加速。
+   */
+  maxTransientWriteRetries?: number
 }
 
 export interface ClaimFilter {
@@ -65,11 +73,13 @@ export class ContextClaimStore {
   private nextSeq: number = 1
   private checkpointing = false
   private readonly checkpointEveryEvents?: number
+  private readonly maxTransientWriteRetries: number
 
   constructor(dir: string, sessionId: string, options: ContextClaimStoreOptions = {}) {
     assertValidSessionId(sessionId)
     this.sessionId = sessionId
     this.checkpointEveryEvents = options.checkpointEveryEvents ?? DEFAULT_CHECKPOINT_EVERY_EVENTS
+    this.maxTransientWriteRetries = options.maxTransientWriteRetries ?? DEFAULT_MAX_TRANSIENT_WRITE_RETRIES
     mkdirSync(dir, { recursive: true })
     this.path = join(dir, `${this.sessionId}.claims.jsonl`)
     this.snapshotPath = join(dir, `${this.sessionId}.claims.snapshot.json`)
@@ -114,16 +124,63 @@ export class ContextClaimStore {
   private pendingBytes = 0
   private writeChain: { running: boolean; again: boolean } = { running: false, again: false }
   private checkpointQueued = false
+  /** 重试不会改变结果的写入错误码（路径不存在 / 不是目录 / 只读文件系统）。 */
+  private static readonly PERMANENT_WRITE_ERROR_CODES = new Set([
+    'ENOENT', 'ENOTDIR', 'EROFS', 'EISDIR',
+  ])
+  /** 撞上永久性错误后置起：停止自动重试。继续重试只会留下永不终止的 250ms
+   *  定时器链，使事件循环永远非空——node --test 因此既不打印汇总也不退出
+   *  （实测：context-injection.test.ts 的 finally 删掉本 store 的目录后整批挂死）。
+   *  新 kick（新数据 / flushWrites）时清位，允许环境恢复后再试。 */
+  private permanentWriteFailure = false
+  /** 最近一次写失败（诊断用，停链时读取输出现场日志）。 */
+  private lastWriteError: Error | null = null
+  /** 短暂性错误（EACCES/EPERM/EBUSY——AV/EDR 秒级锁会自愈，及未知码）的连续
+   *  失败计数：成功写入即清零；达 maxTransientWriteRetries 才转永久停链。
+   *  一次 EACCES 即停链会让锁释放后滞留行永久留在内存（agent-16）。 */
+  private transientWriteRetries = 0
+
+  /** 停链诊断「每实例至多一次」的独立闸：不复用 lastWriteError 判定——
+   *  checkpoint 段异常（kickWriteChain 的 catch）也会赋 lastWriteError，
+   *  复用会让「首次真停链」静默无日志。 */
+  private stallLogged = false
+
+  /** 诊断读取点：最近一次的写失败（写链停链原因 / checkpoint 段异常），
+   *  供排障与测试断言使用（lastWriteError 的真实消费点）。 */
+  getLastWriteError(): Error | null {
+    return this.lastWriteError
+  }
+
+  /** 写链停链的现场记录：置状态 + 首次停链输出一次诊断（写链停了 = 滞留行留
+   *  在内存，值得在日志里可见；后续重试失败不再重复打）。 */
+  private stallWriteChain(err: unknown): void {
+    const error = err instanceof Error ? err : new Error(String(err))
+    this.permanentWriteFailure = true
+    this.lastWriteError = error
+    if (!this.stallLogged) {
+      this.stallLogged = true
+      console.error(
+        `[claim-store] 写链停链（${error.message}）——滞留行保留在内存，环境恢复后由新事件 / flushWrites 重试`,
+      )
+    }
+  }
 
   private kickWriteChain(): void {
     if (this.writeChain.running) {
       this.writeChain.again = true
       return
     }
+    // 新数据 / 显式请求意味着环境可能已恢复（目录重建、权限修复）——清位再试一次
+    this.permanentWriteFailure = false
+    this.transientWriteRetries = 0
     queueMicrotask(() => {
       if (this.writeChain.running) return
       this.writeChain.running = true
-      void this.runWriteChain()
+      void this.runWriteChain().catch((err) => {
+        // checkpoint 段异常（如快照写失败）不应成为 unhandled rejection——
+        // 记录后交由下一次 kick / flushWrites 重试。
+        this.lastWriteError = err instanceof Error ? err : new Error(String(err))
+      })
     })
   }
 
@@ -141,8 +198,24 @@ export class ContextClaimStore {
           try {
             await appendFile(this.path, text, 'utf-8')
             this.pendingBytes -= Buffer.byteLength(text)
-          } catch {
+            this.transientWriteRetries = 0 // 写成功 = 环境健康，梯度计数清零
+          } catch (err) {
             this.pendingLines = [...lines, ...this.pendingLines]
+            const code = (err as NodeJS.ErrnoException).code ?? ''
+            // 永久性错误（目录不存在 / 路径不是目录 / 只读文件系统）：
+            // 重试不会改变结果，只会留下永不终止的 250ms 定时器链（见字段注释）。
+            if (ContextClaimStore.PERMANENT_WRITE_ERROR_CODES.has(code)) {
+              this.stallWriteChain(err)
+              return
+            }
+            // 短暂性错误（EACCES/EPERM/EBUSY——AV/EDR 秒级锁会自愈）与未知码：
+            // 梯度重试——锁释放后无需新事件即落盘；连续 maxTransientWriteRetries
+            // 次仍失败才转永久（防止定时器链永不终止，与旧的一刀切停链划清）。
+            this.transientWriteRetries++
+            if (this.transientWriteRetries >= this.maxTransientWriteRetries) {
+              this.stallWriteChain(err)
+              return
+            }
             await new Promise((r) => setTimeout(r, 250))
             continue
           }
@@ -153,7 +226,14 @@ export class ContextClaimStore {
     } finally {
       this.writeChain.running = false
       this.writeChain.again = false
-      if (this.pendingLines.length > 0 || this.checkpointQueued) this.kickWriteChain()
+      // 永久性失败已停止自动重试：不再重建链（否则 pendingLines 非空会让它无限重启，
+      // 与 catch 里的无限重试等价）。
+      if (
+        !this.permanentWriteFailure &&
+        (this.pendingLines.length > 0 || this.checkpointQueued)
+      ) {
+        this.kickWriteChain()
+      }
     }
   }
 
@@ -183,8 +263,18 @@ export class ContextClaimStore {
   async flushWrites(timeoutMs = 10_000): Promise<void> {
     this.kickWriteChain()
     const deadline = Date.now() + timeoutMs
+    let requeued = false
     for (;;) {
       if (!this.writeChain.running && this.pendingLines.length === 0 && !this.checkpointQueued) return
+      // 链已停（梯度耗尽 / 永久错误）但有滞留：入口 kick 若撞上运行中的链会被
+      // 吞为 again、停链后没有下一次 kick——flush 是显式请求，清位重踢一次
+      // （有界防热循环；锁若已释放即在此排空）。补踢后仍停链则确认排不掉，
+      // 提前返回不空转（agent-16 审查跟进项：again 吞一拍）。
+      if (!this.writeChain.running && (this.pendingLines.length > 0 || this.checkpointQueued)) {
+        if (requeued) return
+        requeued = true
+        this.kickWriteChain()
+      }
       if (Date.now() > deadline) return
       await new Promise((r) => setTimeout(r, 10))
     }

@@ -1,4 +1,5 @@
 import { providerIdentityHeaders } from './caller-identity.js'
+import { normalizeBaseUrl } from './endpoint-map.js'
 
 /**
  * 动态问候语共享模块(P1-2):算法模板池 + flash LLM 单句生成。
@@ -219,11 +220,16 @@ export async function generateGreetingLlm(
     stream: false,
   }
 
+  // 与 factory 的 OpenAI 分支同源：欢迎语也拼 `${baseUrl}/chat/completions`，
+  // 用户在 Base URL 里粘贴完整请求 URL 时这里会 404——但失败被 catch 咽下、
+  // 静默降级成模板池，所以症状只是「问候语从来不换」，比对话链路更隐蔽。
+  const chatUrl = `${normalizeBaseUrl(baseUrl)}/chat/completions`
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? GREETING_LLM_TIMEOUT_MS)
 
   try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await fetch(chatUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -403,6 +403,19 @@ describe('checkTddGate task-start guidance', () => {
     assert.equal(hint, null)
   })
 
+  // 台账 F6：evidence 的 filesModified 按 run 重置——任务中段的新 run 开头会
+  // 「零编辑」误成立，「Task start」文案在只读轮/继续轮反复出现（实测：两次
+  // 只读回复都收到了该提示）。true 起步窗口之外由调用点传 taskStart:false。
+  it('taskStart=false：任务中段的零编辑轮不产 Task start 文案', () => {
+    const hint = checkTddGate({
+      filesRead: new Set(),
+      filesModified: new Set(),
+      requiresCodeVerification: true,
+      taskStart: false,
+    })
+    assert.equal(hint, null, '中段的零编辑轮（run 重置所致的假象）不得复发 Task start')
+  })
+
   it('keeps warning while editing without having touched a test file', () => {
     const hint = checkTddGate({
       filesRead: new Set(['src/foo.ts']),

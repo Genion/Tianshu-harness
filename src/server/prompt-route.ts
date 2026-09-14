@@ -17,6 +17,7 @@
 import type { ServerResponse } from 'node:http'
 import type { RouteHandler } from './index.js'
 import { allowedCorsOrigin } from './cors.js'
+import type { SseConnectionRegistry } from './sse-registry.js'
 import { SseStream } from './sse-stream.js'
 
 /** A session event as forwarded to the legacy SSE wire. */
@@ -36,6 +37,11 @@ export interface PromptRouteDeps {
     subscribe: (listener: (ev: PromptSessionEvent) => void) => (() => void) | undefined
     start: () => boolean
   } | null
+  /**
+   * SSE 活动连接注册表：建连登记、清理路径注销——关停链 closeAll() 主动
+   * 发 done 帧 + end，否则活跃长连阻塞 server.close(cb)（agent-13）。
+   */
+  sseRegistry?: SseConnectionRegistry
 }
 
 /** Session event types forwarded on the legacy wire (same names both sides). */
@@ -65,6 +71,10 @@ export function handlePromptSSE(deps: PromptRouteDeps, res: ServerResponse, prom
     return
   }
 
+  // 长连阶段开始才登记（上面的失败路径即刻收场，无需入集合）：
+  // 关停链 closeAll() 主动发 done 帧 + end（sse-registry.ts）。
+  deps.sseRegistry?.register(sse)
+
   let closed = false
   let unsubscribe: (() => void) | undefined
 
@@ -73,6 +83,7 @@ export function handlePromptSSE(deps: PromptRouteDeps, res: ServerResponse, prom
     closed = true
     res.removeListener('close', onClientClose)
     unsubscribe?.()
+    deps.sseRegistry?.unregister(sse)
   }
   const onClientClose = () => {
     // Client went away: stop streaming, but do NOT abort — identical to the

@@ -199,6 +199,8 @@ export interface AgentConfig {
   onStatusLine?: (text: string | null) => void
   /** 安全模式正则告警（层1）。默认开；false 或 RIVET_SECURITY_GUIDANCE=0 关闭。 */
   securityGuidance?: boolean
+  /** 打断留痕开关（config agent.interruptMarker；undefined = 默认开）。 */
+  interruptMarker?: boolean
   /** Explicit opt-in for HEARTH anchor invariant observation (postTurn, diagnostic only). Disabled by default. */
   hearthObserveEnabled?: boolean
   /** Enable cross-session knowledge loading (memory block, playbook events, companion presence).
@@ -263,6 +265,11 @@ export interface AgentConfig {
     domainTier?: readonly string[]
     disabledTools?: readonly string[]
   }
+  /** Zen Mode — 会话启动期把主控工具面收窄到只读（读面），模型调面外工具 /
+   *  首消息分诊 / 步数预算超时 / /fast 时晋升 full（全量面）。缺省 undefined
+   *  → 禁用（全量面，恒放行）。worker 会话（headless / delegationDepth>0）不 arm。
+   *  值形态为 resolveZenConfig 物化结果（bootstrap 解析 tools.zen 后传入）。 */
+  zen?: import('./zen-mode.js').ResolvedZenConfig
   /** 当前 provider 的前缀缓存策略 — 逃生口 /tools enable 用它量化挂载的缓存代价。 */
   prefixCacheStrategy?: 'deepseek-native' | 'anthropic-cache-control' | 'none'
   /** 当前模型是否接受图片输入（多模态 user 消息）。按模型声明（config.models[].supportsVision），
@@ -348,6 +355,13 @@ export interface AgentCallbacks {
   onApprovalRequired: (id: string, name: string, input: Record<string, unknown>) => Promise<ApprovalResult | boolean>
   onCheckpoint?: (hash: string) => void
   onPhaseChange?: (phase: string, detail?: { tool?: string; reason?: string; suggestion?: string; voluntary?: boolean; source?: string }) => void
+  /** Zen Mode 相位镜像：run 开始与每次晋升各发一次（桌面端读面徽章）。
+   *  worker/子代理会话不接 zen → 不触发。 */
+  onZenPhaseChange?: (
+    phase: 'zen' | 'full',
+    reason?: 'tool' | 'timeout' | 'triage' | 'user',
+    stats?: { armed: boolean; zenTurns: number },
+  ) => void
   /** Auto session domain resolved at the first bind; observability only. */
   onDomainResolved?: (payload: DomainResolvedPayload) => void
   /** Auto domain drift is user-facing observability only; it never changes model state. */

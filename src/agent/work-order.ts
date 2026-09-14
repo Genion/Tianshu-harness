@@ -281,6 +281,12 @@ export const workerResultSchema = z.object({
   risks: z.array(z.string()),
   nextActions: z.array(z.string()),
   evidenceStatus: z.enum(['verified', 'failed', 'blocked', 'unverified', 'skipped']).default('unverified'),
+  /** 结果产出通道（**系统盖章，非 worker 自报**——刻意不进 workerResultIngestSchema，
+   *  同 objective 的处理：两边都自报就无法对账）：live=终轮直接产出 /
+   *  finalized=带完整历史的终型轮 / repaired=无历史修复轮 / salvaged=字段级打捞 /
+   *  blocked=结构化阻塞。2026-09-13 假报告事故后新增，供下游判断该结论是否配当
+   *  正式陈述。 */
+  reportSource: z.enum(['live', 'finalized', 'repaired', 'salvaged', 'blocked']).optional(),
   /** worker 自报的研究覆盖规模，可审计性计数；两 schema 必须同时加，否则 ingest 入口 zod strip 剥掉 */
   sourcesReviewed: z.number().int().min(0).optional(),
   /**
@@ -546,7 +552,7 @@ export function createReadOnlyWorkOrder(input: CreateReadOnlyWorkOrderInput): Wo
     aggregationPolicy: input.aggregationPolicy ?? 'primary_decides',
     budget: {
       maxTurns: input.budget?.maxTurns ?? 24,
-      maxTokens: input.budget?.maxTokens ?? profileRegistry.get(input.profile)?.defaultMaxTokens ?? 4096,
+      maxTokens: input.budget?.maxTokens ?? profileRegistry.get(input.profile)?.defaultMaxTokens ?? 16384, // 报告档（收尾/修复轮 max_tokens）：与 worker-runtime 探索轮同档——4096 顶格截断只读大报告（实测见 worker-runtime.ts:157）
       timeoutMs: Math.round((input.budget?.timeoutMs
         ?? profileRegistry.get(input.profile)?.defaultTimeoutMs
         ?? progressiveTimeout(input.sessionTurn))
@@ -1027,6 +1033,7 @@ export function salvageWorkerResult(text: string, expectedWorkOrderId: string, p
     nextActions: ['Weigh salvaged findings as unverified leads; re-dispatch with resume if full fidelity is needed'],
     evidenceStatus: 'unverified',
     failureReason: 'json_parse',
+    reportSource: 'salvaged',
     ...(parseError !== undefined ? { parseErrorKind: classifyWorkerParseError(parseError) ?? 'json_syntax' } : {}),
   }
 }
@@ -1065,6 +1072,7 @@ export function buildBlockedWorkerResult(order: WorkOrder, reason: string, failu
     risks: ['Worker did not return schema-valid JSON'],
     nextActions: ['Primary should continue without trusting this worker result'],
     evidenceStatus: 'blocked',
+    reportSource: 'blocked',
     ...(failureReason ? { failureReason } : {}),
   }
 }

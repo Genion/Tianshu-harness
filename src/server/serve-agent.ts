@@ -864,9 +864,13 @@ export function buildManagedAgent(
       // 持久化切换（与 TUI bootstrap.switchAgentRuntime 同源）：metadata.model/
       // provider 反映当前模型，JSONL 落 model_switch 审计行——没有这两笔，
       // 桌面端换模型在会话日志里是隐形的。best-effort，不阻塞切换。
-      // 会话侧存 provider:modelId，避免 deepseek / deepseek-spark 同 wire id 撞车
-      // （resume / listModels current 才能消歧）；发给 API 的仍是 spec.model.id。
-      const modelRef = `${spec.provider.name}:${spec.model.id}`
+      // 会话侧存 provider:keyId:modelId（多 key）/ provider:modelId（单 key），避免
+      // deepseek / deepseek-spark 同 wire id 撞车；keyId 段让 resume 与 listModels 的
+      // current 判定精确到账号（缺它则同 provider 双 key 挂同 wire id 时无法区分）；
+      // 发给 API 的仍是 spec.model.id。
+      const modelRef = spec.keyId
+        ? `${spec.provider.name}:${spec.keyId}:${spec.model.id}`
+        : `${spec.provider.name}:${spec.model.id}`
       try {
         stores.persist.updateMetadata({ model: spec.model.id, provider: spec.provider.name })
         stores.persist.appendModelSwitch({ from: fromModel, to: spec.model.id, provider: spec.provider.name })
@@ -910,6 +914,11 @@ export function buildManagedAgent(
     // 句柄。abort() 仅中止当前 turn；shutdown() 是终结性操作。
     shutdown: async () => {
       try { void agent.cancelIdleCompaction() } catch { /* best-effort */ }
+      // 中止路径的 postSession 在后台链上（memory/consolidation 写入）；进程关停前有界收口。
+      try { await agent.drainPostSession(5_000) } catch { /* best-effort */ }
+      // agent-16：claim-store 是内存 pending + 异步写链（write-behind）——会话末
+      // 撞上短暂文件锁（AV/EDR）时滞留行会随进程退出丢失；收口显式排空（有界）。
+      try { await stores.claimStore.flushWrites(2_000) } catch { /* best-effort */ }
       const coordinator = stores.refs.coordinator
       let settled = !coordinator
       try {

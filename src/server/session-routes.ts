@@ -34,6 +34,7 @@
 import { decodeRouteParam, type RouteHandler } from './index.js'
 import { isAuthorizedRequest } from './auth.js'
 import { allowedCorsOrigin } from './cors.js'
+import type { SseConnectionRegistry } from './sse-registry.js'
 import { SseStream } from './sse-stream.js'
 import type { RuntimeSessionManager } from './session-manager.js'
 import type { Artifact } from '../artifact/types.js'
@@ -42,7 +43,8 @@ import type { ApprovalMode } from '../agent/loop-types.js'
 import type { ReasoningEffort } from '../agent/auto-reasoning.js'
 import type { PlanDocument } from '../plan/plan-store.js'
 import type { Config } from '../config/schema.js'
-import type { SessionRecord } from './protocol.js'
+import type { SessionEvent, SessionRecord } from './protocol.js'
+import { compactReplayRuns, compactReplayRunsWithStats, isReplayCompactionEnabled } from './replay-compaction.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
 import { getRollbackPreview, rollbackToCheckpoint, makeOwnershipGuard } from '../agent/checkpoint.js'
 import { listProjectFiles, rankFiles, listDirEntries } from './file-list.js'
@@ -86,6 +88,11 @@ type SessionRouteDependencies = {
    * `() => resolveServeContext().config`；缺省时退回快照（向后兼容）。
    */
   reloadConfig?: () => Config
+  /**
+   * SSE 活动连接注册表：/stream 建连登记、清理路径注销——关停链 closeAll()
+   * 主动发 done 帧 + end，否则活跃长连阻塞 server.close(cb)（agent-13）。
+   */
+  sseRegistry?: SseConnectionRegistry
 }
 
 /** Vision upload guards — provider-safe formats and a per-image byte ceiling. */
@@ -948,6 +955,11 @@ export function buildSessionRoutes(
         }
       }
 
+      // Stop → settle window（同 /rewind）：Stop 后 status 立刻变 aborted，桌面端
+      // Composer 据此把下一条输入按新 prompt 发出，而 agent loop 还在收尾、
+      // `running` 仍为 true → 409 busy「会话正在执行中」。停下来的 run 等它真正
+      // 收尾再起新轮；仍在跑的 run 立即 409（方法直接返回），steer/queue 语义不变。
+      await manager.waitForRunSettled(params!.id!)
       const ok = manager.run(params!.id!, prompt, images)
       // 区分两种拒绝：session 缺失（404，前端可提示重新打开）与执行中（409 busy，
       // 前端显示"正在执行中"而非错误 toast——用户连续发消息时这是正常排队语义）。
@@ -1052,6 +1064,10 @@ export function buildSessionRoutes(
         const limit = Math.min(Math.max(Number(params?.limit ?? 200) || 200, 1), 2000)
         const page = await manager.getHistoryPage(params!.id!, before, limit)
         if (!page) return { status: 404, body: { error: 'Session not found' } }
+        // 冷页末段由 `before` 的存在保证已闭合 → 可整段合并。
+        if (isReplayCompactionEnabled()) {
+          return { status: 200, body: { ...page, events: compactReplayRuns(page.events, { keepOpenTail: false }) } }
+        }
         return { status: 200, body: page }
       }
       const since = Number(params?.since ?? 0) || 0
@@ -1059,6 +1075,11 @@ export function buildSessionRoutes(
       // off the main thread instead of stalling every other request on it.
       const result = await manager.getEventsAsync(params!.id!, since)
       if (!result) return { status: 404, body: { error: 'Session not found' } }
+      // 回放投影：已闭合 delta run 压成单事件（见 replay-compaction.ts）；
+      // 末段若仍在流式输出则保留原样，客户端经 open 标志尾部追加。
+      if (isReplayCompactionEnabled()) {
+        return { status: 200, body: { ...result, events: compactReplayRuns(result.events, { keepOpenTail: true }) } }
+      }
       return { status: 200, body: result }
     }, apiToken),
 
@@ -1399,7 +1420,7 @@ export function buildSessionRoutes(
       // blocking the loop (async read + off-thread parse), so concurrent
       // streams keep their keepalives during someone else's big replay.
       const existing = await manager.getEventsAsync(id, since)
-      if (__dbg) console.log(`[stream] getEventsAsync +${Date.now() - __t0}ms events=${existing?.events.length ?? 0} id=${id}`)
+      if (__dbg) console.log(`[stream] getEventsAsync +${Date.now() - __t0}ms events=${existing?.events.length ?? 0} id=${id} since=${since} t=${__t0}`)
       if (!existing) return { status: 404, body: { error: 'Session not found' } }
 
       // Tear down BOTH on peer death (write throws → onDead) and on the normal
@@ -1413,8 +1434,11 @@ export function buildSessionRoutes(
         keepalive = undefined
         unsubscribe?.()
         unsubscribe = undefined
+        dependencies.sseRegistry?.unregister(sse)
       }
       const sse = new SseStream(res, cleanup, allowedCorsOrigin(headers ?? {}))
+      // 登记进活跃连接集合：关停链 closeAll() 主动发 done 帧 + end（sse-registry.ts）。
+      dependencies.sseRegistry?.register(sse)
       // 冷热双通道：回放最前发 replay_window 合成元事件（不落盘、seq=0），
       // 告知前端本次回放窗口与磁盘完整范围——diskFirstSeq < floorSeq 时
       // 前端显示「加载更早的历史」，经 GET /events?before= 分页回填。
@@ -1431,9 +1455,30 @@ export function buildSessionRoutes(
       if (runningJobs) {
         sse.send('job_snapshot', { seq: 0, ts: Date.now(), type: 'job_snapshot', data: { jobs: runningJobs } })
       }
+      // 禅相位建连快照（seq=0 合成事件，语义同 replay_window / job_snapshot）：
+      // zen_phase 只在 run 起点 arm 与每次晋升时发，长会话里它早已滑出回放窗口，
+      // 而重连是从 ?since= 续读的——不补发，「切走再切回」的相位徽章就必然丢失，
+      // 要等下一次 run 才回来。取自 record 镜像（onZenPhaseChange 同步 + 落
+      // index.json，sidecar 重启后仍在）；从未收到过相位变化的会话不发。
+      const zenMirror = manager.getZenPhaseMirror(id)
+      if (zenMirror) {
+        sse.send('zen_phase', { seq: 0, ts: Date.now(), type: 'zen_phase', data: zenMirror })
+      }
       // Bound replay slices by both work count and elapsed time so slow
       // serialization/socket writes cannot monopolize the event loop.
-      await sendReplayTimeSliced(res, sse, existing.events)
+      // 回放投影：已闭合 delta run 压成单事件（replay-compaction.ts）——冷开
+      // 会话的帧数从「每 40ms 一条」降到「每段 run 一条」；末段仍在流式输出
+      // 时保留原样，live 追加照旧走客户端 open 标志。
+      let replayEvents: ReadonlyArray<SessionEvent> = existing.events
+      if (isReplayCompactionEnabled()) {
+        const __c0 = performance.now()
+        const { events: compacted, stats } = compactReplayRunsWithStats(existing.events, { keepOpenTail: true })
+        replayEvents = compacted
+        if (stats.input >= 1000 || process.env.RIVET_SERVE_TIMING === '1' || __dbg) {
+          console.error(`[serve-timing] replay id=${id} since=${since} events=${stats.input} compacted=${stats.output} merged=${stats.merged} ${Math.round(performance.now() - __c0)}ms`)
+        }
+      }
+      await sendReplayTimeSliced(res, sse, replayEvents)
       let catchingUp = true
       let lastCatchupSeq = existing.lastSeq
       const deferredLive: Array<{ type: string; seq: number }> = []
@@ -1804,6 +1849,12 @@ export function buildSessionRoutes(
       if (!ensured) {
         return { status: 409, body: { error: 'Session agent unavailable (cwd missing or config invalid)' } }
       }
+      // Stop → settle window (waitForRunSettled): the desktop's edit-resend
+      // aborts, polls GET /sessions/:id until status leaves 'running', then
+      // rewinds — but status flips to 'aborted' while the agent loop is still
+      // unwinding, so the rewind landed on the `running` guard (409). A run
+      // nobody stopped keeps the immediate 409 (the method returns at once).
+      await manager.waitForRunSettled(params!.id!)
       const ok = manager.rewind(params!.id!, data.messageIndex, { rollbackFiles: data.rollbackFiles === true })
       if (!ok) {
         return { status: 409, body: { error: 'Session is running or index out of range' } }

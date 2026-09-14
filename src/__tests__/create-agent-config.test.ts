@@ -36,6 +36,7 @@ const testConfig = {
     companionPresenceEnabled: false,
     dreamEnabled: true,
     securityGuidance: true,
+    interruptMarker: true,
     scoutEvidenceFirewall: false,
     desktopTools: false,
     hearthObserveEnabled: false,

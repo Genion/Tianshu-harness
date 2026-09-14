@@ -45,7 +45,7 @@ import type {
 export class FileSessionPersistence implements SessionPersistenceAdapter {
   constructor(
     private readonly baseDir: string,
-    private readonly opts: { maxEventsDiskBytes?: number } = {},
+    private readonly opts: { maxEventsDiskBytes?: number; maxTransientWriteRetries?: number } = {},
   ) {}
 
   /** Per-session event write buffer — batches high-frequency appendFileSync
@@ -58,6 +58,10 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
    *  death, where page-cache contents survive. */
   private eventBuffers = new Map<string, BufferedLine[]>()
   private flushTimer: ReturnType<typeof setTimeout> | null = null
+  /** 每会话写失败状态（events 链）：短暂错误计数 + 永久停链位。 */
+  private eventChainFailures = new Map<string, WriteFailureState>()
+  /** 每会话写失败状态（record 链，与 events 链独立——不同文件的失败互不牵连）。 */
+  private recordChainFailures = new Map<string, WriteFailureState>()
   /** Per-session deferred-trim in-flight guard: one queued trim per session
    *  (flush 热路径只入队，裁剪在 setImmediate 中执行——见 deferTrim）。 */
   private pendingTrims = new Set<string>()
@@ -69,6 +73,13 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   private static readonly INDEX_INTERVAL = 500
   /** 单条区间读的 parse 走 cpuPool 的阈值（与 loadEventsAsync 同源策略）。 */
   private static readonly INLINE_PARSE_MAX_BYTES = 256 * 1024
+  /** 重试不会改变结果的写入错误码（路径不存在 / 不是目录 / 只读文件系统 / 目标被占）。 */
+  private static readonly PERMANENT_WRITE_ERROR_CODES = new Set(['ENOENT', 'ENOTDIR', 'EROFS', 'EISDIR'])
+  /** 短暂性写错误（EACCES/EPERM/EBUSY——AV/EDR 秒级锁会自愈）与未知码的
+   *  梯度上限：连续失败达上限才停链（成功即清零）。无上限的 250ms 重试会让
+   *  定时器链永不终止、事件循环永不空——node --test 整批挂死的既有形态
+   *  （claim-store agent-16 修复的同款教训）。测试可经构造 opts 注入小值。 */
+  private static readonly MAX_TRANSIENT_WRITE_RETRIES = 8
   /** Per-session sparse-index write tracker（进程内状态；重启后 lazily 重建）。 */
   private indexTracks = new Map<string, IndexTrack>()
   /** Hard cap per event JSON line — guard against runaway payloads (plan_draft
@@ -93,6 +104,28 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
 
   private maxEventsDiskBytes(): number {
     return this.opts.maxEventsDiskBytes ?? FileSessionPersistence.DEFAULT_MAX_EVENTS_DISK_BYTES
+  }
+
+  private maxTransientRetries(): number {
+    return this.opts.maxTransientWriteRetries ?? FileSessionPersistence.MAX_TRANSIENT_WRITE_RETRIES
+  }
+
+  /** 记录一次写失败；返回 true = 应停链（永久码或梯度耗尽）。
+   *  永久码重试不改变结果；短暂码（EACCES/EPERM/EBUSY——AV/EDR 秒级锁会自愈）
+   *  与未知码走梯度，连续失败达上限才转永久（防定时器链永不终止，agent-16）。 */
+  private registerWriteFailure(store: Map<string, WriteFailureState>, id: string, code: string): boolean {
+    const state = store.get(id) ?? { transient: 0, permanent: false }
+    store.set(id, state)
+    if (FileSessionPersistence.PERMANENT_WRITE_ERROR_CODES.has(code)) {
+      state.permanent = true
+      return true
+    }
+    state.transient++
+    if (state.transient >= this.maxTransientRetries()) {
+      state.permanent = true
+      return true
+    }
+    return false
   }
 
   private dir(id: string): string {
@@ -121,6 +154,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       st.dirty = true
     }
     if (st.running) return
+    // 新记录 = 重试许可：清掉该会话的失败状态（同 events 链的 kick 清位语义）
+    this.recordChainFailures.delete(record.id)
     queueMicrotask(() => {
       if (st.running) return
       st.running = true
@@ -136,15 +171,25 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
               const final = join(d, 'index.json')
               await writeFile(tmp, JSON.stringify(snapshot), 'utf8')
               await rename(tmp, final)
-            } catch {
+              // 写成功 = 环境健康：清失败计数（与 events 链/claim-store 对称，
+              // 否则「失败→成功→失败」交替时计数跨成功累计，8 次非连续失败即提前停链）
+              this.recordChainFailures.delete(record.id)
+            } catch (err) {
               st.dirty = true // 失败重试（退避防热循环）
+              const code = (err as NodeJS.ErrnoException).code ?? ''
+              // 错误分类（agent-16）：永久码或梯度耗尽 → 停链（dirty 保留，
+              // 等下一次 saveRecord / flushSync 清位重试）；其余 250ms 退避续跑。
+              if (this.registerWriteFailure(this.recordChainFailures, record.id, code)) break
               await new Promise((r) => setTimeout(r, 250))
             }
           }
         } finally {
           st.running = false
-          if (st.dirty) this.saveRecord(st.latest)
-          else this.recordWrites.delete(record.id)
+          // 停链（永久失败）时不再自动重启——dirty 保留待外部新记录 / 同步
+          // flush 清位重试；未停链时补一轮（原语义）。
+          const stalled = this.recordChainFailures.get(record.id)?.permanent === true
+          if (st.dirty && !stalled) this.saveRecord(st.latest)
+          else if (!st.dirty) this.recordWrites.delete(record.id)
         }
       })()
     })
@@ -165,6 +210,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       renameSync(tmp, final)
       st.dirty = false
       this.recordWrites.delete(id)
+      this.recordChainFailures.delete(id) // 同步排空成功同样清停链状态
     } catch { /* best-effort：留在队列里下轮重试 */ }
   }
 
@@ -221,6 +267,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       st.again = true
       return
     }
+    // 新数据 / 显式请求（flush）= 重试许可：清掉停链位再试一次
+    this.eventChainFailures.delete(sessionId)
     queueMicrotask(() => {
       const cur = this.writeChains.get(sessionId)
       if (!cur || cur.running) return
@@ -243,9 +291,15 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
           try {
             await mkdir(d, { recursive: true })
             await appendFile(join(d, 'events.jsonl'), text, { encoding: 'utf8', mode: 0o600 })
-          } catch {
+            this.eventChainFailures.delete(sessionId) // 写成功 = 环境健康，清失败状态
+          } catch (err) {
             // 失败重排队首 + 退避（持续失败不热循环；行不丢）。
             this.eventBuffers.set(sessionId, [...buf, ...(this.eventBuffers.get(sessionId) ?? [])])
+            const code = (err as NodeJS.ErrnoException).code ?? ''
+            // 错误分类（agent-16）：永久码或梯度耗尽 → 停链（行保留在缓冲，
+            // 等下一次 kick/flush 清位重试）；其余 250ms 退避续跑。无分类的
+            // 无限重试会让定时器链永不终止——node --test 整批挂死的既有形态。
+            if (this.registerWriteFailure(this.eventChainFailures, sessionId, code)) return
             await new Promise((r) => setTimeout(r, 250))
             continue
           }
@@ -266,8 +320,10 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     } finally {
       st.running = false
       st.again = false
-      // finally 期间到达的新行补一轮。
-      if ((this.eventBuffers.get(sessionId)?.length ?? 0) > 0 || this.pendingChainTrims.has(sessionId)) {
+      // finally 期间到达的新行补一轮；永久失败已停链时不重启——否则与无分类的
+      // 无限重试等价，定时器链永不释放（agent-16）。
+      const stalled = this.eventChainFailures.get(sessionId)?.permanent === true
+      if (!stalled && ((this.eventBuffers.get(sessionId)?.length ?? 0) > 0 || this.pendingChainTrims.has(sessionId))) {
         this.kickWriteChain(sessionId)
       }
     }
@@ -277,10 +333,20 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   async flushSessionAsync(sessionId: string, timeoutMs = 30_000): Promise<void> {
     this.kickWriteChain(sessionId)
     const deadline = Date.now() + timeoutMs
+    let requeued = false
     for (;;) {
       const st = this.writeChains.get(sessionId)
       const pending = (this.eventBuffers.get(sessionId)?.length ?? 0) > 0 || this.pendingChainTrims.has(sessionId)
       if ((!st || !st.running) && !pending) return
+      // 已停链（永久错误 / 梯度耗尽）但有滞留：入口 kick 若撞上运行中的链会被
+      // 吞为 again、停链后没有下一次 kick——flush 是显式请求，清位重踢一次
+      // （有界防热循环；锁若已释放即在此排空）。补踢后仍停链则确认排不掉，
+      // 提前返回不空转（agent-16 审查跟进项：again 吞一拍）。
+      if (this.eventChainFailures.get(sessionId)?.permanent === true && (!st || !st.running)) {
+        if (requeued) return
+        requeued = true
+        this.kickWriteChain(sessionId)
+      }
       if (Date.now() > deadline) return
       await new Promise((r) => setTimeout(r, 10))
     }
@@ -294,14 +360,38 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     }
     for (const id of this.eventBuffers.keys()) this.kickWriteChain(id)
     const deadline = Date.now() + timeoutMs
+    // 停链但有滞留的会话：清位重踢一次（同 flushSessionAsync 的补踢语义——
+    // 入口 kick 可能撞上运行中的链被吞为 again、停链后没有下一次 kick）。
+    // 补踢过仍停链才算「确认排不掉」，跳过不空转（agent-16 审查跟进项）。
+    const requeuedEvents = new Set<string>()
+    const requeuedRecords = new Set<string>()
     for (;;) {
       let anyRunning = false
       for (const [id, st] of this.writeChains) {
-        if (st.running || (this.eventBuffers.get(id)?.length ?? 0) > 0) { anyRunning = true; break }
+        const stalled = this.eventChainFailures.get(id)?.permanent === true
+        const pending = (this.eventBuffers.get(id)?.length ?? 0) > 0
+        if (stalled && !st.running && pending) {
+          if (!requeuedEvents.has(id)) {
+            requeuedEvents.add(id)
+            this.kickWriteChain(id)
+            anyRunning = true
+          }
+          continue
+        }
+        if (!stalled && (st.running || pending)) { anyRunning = true; break }
       }
       if (!anyRunning) {
-        for (const st of this.recordWrites.values()) {
-          if (st.running || st.dirty) { anyRunning = true; break }
+        for (const [id, st] of this.recordWrites) {
+          const stalled = this.recordChainFailures.get(id)?.permanent === true
+          if (stalled && !st.running && st.dirty) {
+            if (!requeuedRecords.has(id)) {
+              requeuedRecords.add(id)
+              this.saveRecord(st.latest) // 清位重试（saveRecord 内清 recordChainFailures）
+              anyRunning = true
+            }
+            continue
+          }
+          if (!stalled && (st.running || st.dirty)) { anyRunning = true; break }
         }
       }
       if (!anyRunning && this.pendingChainTrims.size === 0) return
@@ -333,6 +423,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     try {
       d = this.ensureDir(sessionId)
       appendFileSync(join(d, 'events.jsonl'), buf.map((b) => b.line).join(''), { encoding: 'utf8', mode: 0o600 })
+      this.eventChainFailures.delete(sessionId) // 同步排空成功同样清停链状态
     } catch {
       // Re-queue on failure — better to retry than lose events.
       const existing = this.eventBuffers.get(sessionId) ?? []
@@ -744,6 +835,10 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     const empty: EventsTail = { events: [], diskFirstSeq: 0, lastSeq: 0, artifactIds: [], total: 0 }
     this.flushSession(id)
     const file = join(this.dir(id), 'events.jsonl')
+    // RIVET_DEBUG_RENDER=1：拆出 read / parse 两段耗时（冷开会话首屏归因，
+    // 见 docs/dev/render-debug-playbook.md）。
+    const __dbg = process.env.RIVET_DEBUG_RENDER === '1'
+    const __t0 = __dbg ? performance.now() : 0
     let text: string
     try {
       text = await readFile(file, 'utf8')
@@ -751,14 +846,21 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       return empty
     }
     if (!text) return empty
+    const __tRead = __dbg ? performance.now() : 0
+    const __log = (mode: string, tail: EventsTail) => {
+      if (__dbg) {
+        console.error(`[stream] loadEventsTail id=${id} bytes=${text.length} read=${Math.round(__tRead - __t0)}ms parse(${mode})=${Math.round(performance.now() - __tRead)}ms total=${tail.total} kept=${tail.events.length}`)
+      }
+      return tail
+    }
     // RawSessionEvent.type 是宽 string（worker 侧不依赖事件类型联合），在此收窄，
     // 与 loadEventsAsync 的边界处理一致。
-    if (text.length < 256 * 1024) return parseEventsTailRaw(text, maxEvents) as EventsTail
+    if (text.length < 256 * 1024) return __log('inline', parseEventsTailRaw(text, maxEvents) as EventsTail)
     try {
-      return (await cpuPool.run('parseEventsTailRaw', [text, maxEvents])) as EventsTail
+      return __log('worker', (await cpuPool.run('parseEventsTailRaw', [text, maxEvents])) as EventsTail)
     } catch {
       // pool 不可用：分批 parse（批间让出事件循环），再在主线程截尾。
-      return tailOf(await chunkedParseEvents(text), maxEvents)
+      return __log('chunked', tailOf(await chunkedParseEvents(text), maxEvents))
     }
   }
 
@@ -912,6 +1014,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     this.flushSession(id)
     this.eventBuffers.delete(id)
     this.indexTracks.delete(id)
+    this.eventChainFailures.delete(id)
+    this.recordChainFailures.delete(id)
     // 在途的延迟裁剪任务指向的目录即将消失——清掉防 Set 泄漏，回调里
     // statSync 失败也会自行返回。
     this.pendingTrims.delete(id)
@@ -1001,6 +1105,12 @@ function sanitize(id: string): string {
 /** events_trimmed marker 行的指纹子串——trim 去重用它判断保留区里是否已有
  *  marker（普通事件行的 type 不可能是这个值）。 */
 const EVENTS_TRIMMED_MARKER = Buffer.from('"type":"events_trimmed"')
+
+/** 写链失败状态：短暂错误连续计数 + 永久停链位（events / record 链各一份）。 */
+interface WriteFailureState {
+  transient: number
+  permanent: boolean
+}
 
 /** 事件写缓冲行：flush 时既要行文本（落盘）也要 seq（稀疏索引条目）。 */
 interface BufferedLine {

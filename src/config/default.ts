@@ -87,6 +87,7 @@ export const DEFAULT_CONFIG: Config = {
     companionPresenceEnabled: false,
     dreamEnabled: true,
     securityGuidance: true,
+    interruptMarker: true,
     scoutEvidenceFirewall: false,
     desktopTools: false,
     crossSessionEnabled: true,

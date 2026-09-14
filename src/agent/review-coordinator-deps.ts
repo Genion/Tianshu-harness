@@ -183,13 +183,56 @@ function mapSquadronFindings(run: CoordinatorRun): ReviewFinding[] {
   return findings
 }
 
-function classifyInfraFailure(result: WorkerResult): ReviewInfraFailure['kind'] {
-  const text = `${result.summary}\n${result.risks.join('\n')}\n${result.artifacts.map(a => a.content).join('\n')}`
-  if (/did not contain a JSON object|schema-valid JSON|parse/i.test(text)) return 'json'
+/**
+ * 归类审查失败：供重试分流（budget 不做同预算复跑）与 /status 健康面板。
+ *
+ * **只按 summary 判定**——它是 worker 对本次失败的正式陈述；risks / artifacts 是
+ * 附带产物，其中的偶然字面曾把一次「worker 未能核查证据」误归为 json，让分类与
+ * 报告正文失去稳定关系（2026-09-13 误分类现场）。导出供单测钉住判据（与
+ * formatFinding 同惯例）。
+ */
+/**
+ * 结果来源前缀：系统打捞/阻塞产物在 claim 里自报家门，避免下游把它们当成 worker
+ * 的正式结论（2026-09-13 假报告事故——一段无历史修复轮的输出曾被原样渲染进
+ * advisory）。live / finalized / 未标记一律不加前缀，保持既有文案干净。
+ */
+function formatReportSource(source: WorkerResult['reportSource']): string {
+  switch (source) {
+    case 'salvaged':
+      return '[来源: 字段级打捞，unverified] '
+    case 'blocked':
+      return '[来源: 结构化阻塞] '
+    case 'repaired':
+      return '[来源: 无历史修复轮，仅供参考] '
+    default:
+      return ''
+  }
+}
+
+export function classifyInfraFailure(result: WorkerResult): ReviewInfraFailure['kind'] {
+  // ① 结构化字段优先：failureReason 是机器可读的权威归因。salvage 路径会把
+  //    `json_parse` 写进这个字段，而它的 summary 可能一个 JSON 字样都没有——
+  //    用文本猜会把它归错（既有用例 F1 钉的就是这条）。
+  switch (result.failureReason) {
+    case 'json_parse':
+    case 'schema_mismatch':
+      return 'json'
+    case 'max_turns':
+      return 'budget'
+    case 'timeout':
+      return 'timeout'
+    default:
+      break
+  }
+  // ② 文本兜底：只看 summary——worker 对本次失败的正式陈述。risks / artifacts
+  //    是附带产物，其中的偶然字面曾把一次「未能核查证据」误归为 json，让归类与
+  //    报告正文失去稳定关系（2026-09-13 误分类现场）。
+  const summary = result.summary
+  if (/did not contain a JSON object|schema-valid JSON|parse/i.test(summary)) return 'json'
   // 预算耗尽(max-turns/无终轮)——确定性失败,同预算重试必死,单列 kind 供重试分流
-  if (/max.?turns|exhausted without a final turn/i.test(text)) return 'budget'
-  if (/timeout|timed out/i.test(text)) return 'timeout'
-  if (/skipped/i.test(text)) return 'skip'
+  if (/max.?turns|exhausted without a final turn/i.test(summary)) return 'budget'
+  if (/timeout|timed out/i.test(summary)) return 'timeout'
+  if (/skipped/i.test(summary)) return 'skip'
   return 'worker'
 }
 
@@ -201,15 +244,17 @@ function mapSquadronInfraFailures(run: CoordinatorRun): ReviewInfraFailure[] {
   const failures: ReviewInfraFailure[] = []
   for (const result of run.results) {
     if (result.status === 'passed') continue
-    // parse-salvaged（status='blocked' 但 findings 非空）：报告坏了但发现活着——
-    // 摘要透传给主控（F1，2026-09-06）；findings 不进 SquadronResult.findings，
-    // 避免 unverified 内容参与 blocking 判定。
-    const salvaged = result.status === 'blocked' && result.findings.length > 0
+    // parse-salvaged（报告坏了但发现活着）：摘要透传给主控（F1，2026-09-06）。
+    // 门槛不含 status——上方已 continue 掉 passed，此处任何 status 的 findings 都是
+    // 打捞产物，一律透传。曾只认 'blocked'，于是一次 failed 形态的 salvage 救回
+    // 9 条发现却全部没送达，advisory 只剩「review DID NOT run」（2026-09-13）。
+    // findings 不进 SquadronResult.findings，避免 unverified 内容参与 blocking 判定。
+    const salvaged = result.findings.length > 0
       ? result.findings.slice(0, 8).map(f => ({ claim: f.claim, confidence: f.confidence }))
       : undefined
     failures.push({
       kind: classifyInfraFailure(result),
-      claim: result.summary,
+      claim: `${formatReportSource(result.reportSource)}${result.summary}`,
       ...(salvaged !== undefined ? { salvagedFindings: salvaged } : {}),
     })
   }

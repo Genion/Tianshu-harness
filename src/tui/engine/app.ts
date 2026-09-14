@@ -332,6 +332,7 @@ import { profileLabel, authorityStarName } from '../format/profile-labels.js'
 import { formatTokenCount, isReducedMotion } from '../format/spinner-status.js'
 import { formatElapsed } from '../tool-elapsed.js'
 import { WatchdogRecoveryPolicy } from '../../agent/watchdog-recovery-policy.js'
+import { ZEN_UNLOCK } from '../../agent/zen-mode.js'
 import { phaseStatusLabel } from '../phase-status.js'
 
 export interface AgentCallbacks {
@@ -530,6 +531,14 @@ export class TuiApp {
    * 宿主）视为「没有在跑」，行为退回改动前。
    */
   private agentRunningProbe: (() => boolean) | null = null
+  /** Zen Mode（禅模式）相位徽章探针——未注入（测试/非 TUI 宿主）时不渲染。 */
+  private zenBadgeProvider: (() => string | undefined) | null = null
+  /** 禅解除提示的存活时长（ms）。 */
+  private static readonly ZEN_UNLOCK_NOTICE_MS = 6000
+  /** 禅解除的一次性提示截止时刻（Date.now() 口径）。zen_unlock 是虚拟工具：结果
+   *  既不该落 scrollback（历史里留一条无信息量的通知），也不该占 live 工具卡
+   *  （无终态回调 → 卡永不消失）。改为 glance bar 上的限时提示，到期自动消失。 */
+  private zenUnlockNoticeUntil = 0
   /** 已提交时间线的 team 波次序号（防止 wave 完成行重复 commit）。 */
   private lastCommittedTeamWave = 0
   /** 当前 wave 的首次观测时间（wave 完成行的耗时来源）。 */
@@ -1854,6 +1863,12 @@ export class TuiApp {
   /** 注入 agent 运行态探针（main.ts 接线到 `ctx.agent.isRunning()`）。 */
   setAgentRunningProbe(probe: () => boolean): void {
     this.agentRunningProbe = probe
+  }
+
+  /** 注入 Zen 相位徽章探针（main.ts 接线到 `ctx.agent.zenController.isZen ? '禅' : undefined`）——
+   *  读面收窄期间状态栏常驻「禅」徽章，晋升后消失。未注入 → undefined（保守降级）。 */
+  setZenBadgeProvider(probe: () => string | undefined): void {
+    this.zenBadgeProvider = probe
   }
 
   notifyRunSettled(): void {
@@ -5466,6 +5481,17 @@ export class TuiApp {
     debugLog(`[tool-result-trace] tui id=${id} name=${name} isError=${isError} len=${result?.length ?? 0}`)
     const displayContent = uiContent ?? result
 
+    // zen_unlock：虚拟解锁工具——结果是状态通知，不是工具产物。
+    // 历史缺陷：按普通结果渲染会永久占用 live 工具卡（该工具没有第二次回调，卡片
+    // 永远等不到终态），表现为「禅模式已解除」一直挂在推理区下面。相位状态本身已由
+    // 「禅」徽章消失表达；这里只补一条限时提示（TTL 到点自动消失）。
+    if (name === ZEN_UNLOCK) {
+      this.zenUnlockNoticeUntil = Date.now() + TuiApp.ZEN_UNLOCK_NOTICE_MS
+      this.markActivity()
+      this.writeBatcher.schedule()
+      return
+    }
+
     // Streaming chunk mode: isError === undefined means intermediate update
     if (isError === undefined) {
       debugLog(`[tool-result-trace] tui id=${id} → STREAMING chunk (not committing to scrollback)`)
@@ -6848,6 +6874,8 @@ export class TuiApp {
         domainName: this.state.domainName,
         branch: this.metricsGlanceController.gitBranch,
         cwd: this.sessionCwd,
+        // Zen 相位徽章：读面收窄期间常驻「禅」，晋升后消失（探针未注入 = 无）
+        zenBadge: this.zenBadgeProvider?.() ?? (Date.now() < this.zenUnlockNoticeUntil ? '禅已解除' : undefined),
         // worker 视图徽章：提示当前输入路由目标（◐ = 在跑，✓/✗ = 已终态）
         workerBadge: this.viewingWorkerId
           ? `→ ${shortOrderLabel(this.viewingWorkerId)}`

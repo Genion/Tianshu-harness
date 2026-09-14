@@ -82,16 +82,18 @@ const PROBE_PATTERNS: Array<{ name: string; re: RegExp }> = [
 /** 白名单路径前缀：这些目录里的 console.log 是正常输出 */
 const WHITELIST_PREFIXES = [
   'scripts/',
+  'desktop/scripts/', // CLI 脚本的用户可见输出（台账 F2 实例②）
   'bin/',
   'src/server/serve.ts', // API server startup logs
 ]
 
-/** 白名单文件后缀 */
+/** 白名单文件后缀（`.md`：文档说明性文本不是可执行探针——台账 F2 实例③） */
 const WHITELIST_SUFFIXES = [
   '.test.ts',
   '.test.tsx',
   '.test.js',
   '.spec.ts',
+  '.md',
 ]
 
 /** 命名 logger 调用前缀——不是探针。
@@ -99,6 +101,11 @@ const WHITELIST_SUFFIXES = [
  *  console 自带的不在此列（CONSOLE_PROBE_RE 专门管 console）。
  *  匹配 `.` 前有标识符且该标识符不是 `console` 的情况。 */
 const STRUCTURED_LOG_RE = /\b(?!console\b)\w+(?:\.\w+)*\.(info|warn|error|debug|trace|verbose|silly|fatal)\s*\(/
+
+/** 单行条件门控的 console 调试（`if (__dbg) console.log(…)` / `if (x) { console.log(…)`）：
+ *  随开关关闭而静默，属结构化调试而非遗留探针（台账 F2 实例①——session-routes.ts 的
+ *  RIVET_DEBUG_RENDER 日志）。真探针通常是裸调用；误放行代价远小于误报诱导删除正常代码。 */
+const CONDITIONAL_DEBUG_RE = /\bif\s*\([^)]*\)\s*\{?\s*console\.(debug|log|dir|trace)\s*\(/
 
 /**
  * 判断文件路径是否在白名单中（不需要检测探针）。
@@ -143,6 +150,10 @@ export function detectProbes(content: string, filePath: string): ProbeHit[] {
       if (re.test(line)) {
         // 排除结构化日志：logger.info( 不算探针
         if (name === 'console.log/debug/dir/trace' && STRUCTURED_LOG_RE.test(line)) {
+          continue
+        }
+        // 排除条件门控调试日志：if (__dbg) console.log(… 随开关静默，不是遗留探针
+        if (name === 'console.log/debug/dir/trace' && CONDITIONAL_DEBUG_RE.test(line)) {
           continue
         }
         hits.push({

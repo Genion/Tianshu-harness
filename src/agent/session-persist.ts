@@ -571,15 +571,12 @@ export class SessionPersist {
     return new ContextClaimStore(getSessionDir(this.cwd), this.sessionId)
   }
 
-  /** Load durable claims from the most recent previous session. */
+  /** Load durable claims from the most recent previous main session.
+   *  listMainSessions 排除 worker-/带点伪 id（`<id>.claims`）并按 updatedAt 降序——
+   *  listSessions + sort().pop() 会选中伪条目（恒返回 []）或非最近会话。 */
   loadPreviousDurableClaims(): ContextClaim[] {
-    const sessions = SessionPersist.listSessions(this.cwd)
-    const previous = sessions
-      .filter(s => s !== this.sessionId)
-      .sort()
-      .pop()
-    if (!previous) return []
-    return ContextClaimStore.loadDurableClaims(getSessionDir(this.cwd), previous)
+    const previous = SessionPersist.listMainSessions(this.cwd).find(s => s.id !== this.sessionId)
+    return previous ? ContextClaimStore.loadDurableClaims(getSessionDir(this.cwd), previous.id) : []
   }
 
   /** Inject durable claims from previous session into a claim store with confidence decay.

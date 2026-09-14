@@ -606,6 +606,17 @@ The composer's microphone button supports voice input on **both macOS and Window
 - On restricted networks, set `RIVET_WHISPER_PROXY=http://proxy:port` to accelerate model downloads.
 
 
+### 🎨 Image Generation (text-to-image)
+
+Register an OpenAI-shaped text-to-image endpoint (SiliconFlow, OpenAI Images, …) and the agent gains a `generate_image` tool.
+
+- **Dedicated slot `agent.imageGenModel`** — `provider.default` and `agent.defaultModel` stay **exactly as they are** (the prefix-cache anchor holds). Until you configure it, the tool never enters the tool list, so users who never enable it see zero difference.
+- **Path back, not bytes**: images land on disk and only the local file path goes back into the conversation. **Base64 never enters the context** — nor the error messages.
+- **Desktop**: Settings → Image Generation — endpoint registration, a **live test that really generates** (it spends one generation credit), and a dropdown of already-registered image models. **Takes effect in the current session immediately** after registering.
+- The size field name is configurable (OpenAI sends `size`, SiliconFlow sends `image_size`) and common response shapes are auto-detected. ComfyUI's native API is not supported yet — it needs an OpenAI-compatible bridge plugin running locally.
+
+Registration steps and parameters are covered under “Image generation” in [Model Configuration](#-model-configuration).
+
 ## Model Configuration
 
 ### Multi-Provider with Adaptive Routing
@@ -653,6 +664,13 @@ Or edit `config.json` directly (only overrides needed, defaults are deep-merged)
 - Multi-modal primary models read images directly; otherwise configure an `agent.visionModel` bridge to describe images before the primary model sees them.
 - Built-in vision models, the `/vision` discovery wizard, `ask_image` follow-ups, and desktop/TUI settings are covered in the [Vision Guide](docs/user-guide-vision.md).
 - Images append at the tail of the conversation and **do not break the prefix cache**; unsupported images are reported, never silently dropped.
+
+### Image generation (text-to-image)
+
+- Dedicated slot `agent.imageGenModel` (desktop: Settings → Image Generation): register an OpenAI-shaped text-to-image endpoint (SiliconFlow, OpenAI Images, …) and the agent gains a `generate_image` tool.
+- **Your working model and `provider.default` stay exactly as they are** — image providers are registered separately, and until one is configured the tool never enters the tool list (zero effect on the prefix cache).
+- The size field name is configurable (OpenAI sends `size`, SiliconFlow sends `image_size`) and the common response shapes are auto-detected; results come back as a **local file path only — base64 never enters the context**.
+- ComfyUI's native API is out of scope (a three-step submit-workflow → poll-history → fetch-`/view` flow); run an OpenAI-compatible bridge plugin locally first.
 
 ### Worker Routing (different models for sub-agents)
 
@@ -927,6 +945,12 @@ Write only the fields you want to override; defaults are deep-merged. Full schem
       "model": "MiniMax-M3"
     },
     "visionAutoBridge": false,    // auto-pick a vision model when visionModel is unset (off by default)
+    "imageGenModel": {            // text-to-image slot: register an endpoint, then call generate_image
+      "provider": "siliconflow-image",  // registered separately — provider.default stays untouched
+      "model": "black-forest-labs/FLUX.2-pro",
+      "size": "1024x1024",        // default size (optional)
+      "sizeField": "image_size"   // OpenAI sends size, SiliconFlow sends image_size (optional)
+    },
     "permissions": {              // permission rules (mirrors /permission commands)
       "allow": [{ "tool": "read" }],
       "deny":  [{ "tool": "bash", "params": { "command": "rm -rf" } }],

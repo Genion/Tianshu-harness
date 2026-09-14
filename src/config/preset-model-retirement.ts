@@ -9,57 +9,6 @@
  */
 
 /**
- * One-shot migration: 退役 deepseek-v4-pro（官方 2026-09-14 下线，且能力已弱于
- * V4.1-Flash 线）。preset 已删条目，但存量用户的 models 快照里仍留着它，而强档
- * 席位（议事会天府 / 三柱护栏席，瑶光门 tierFloor='strong'）按 tier 路由会持续
- * 命中它：按 3/6 的价跑一个即将失效的型号，且用户界面上看到的是会话默认的
- * v4-flash。删掉条目，卡池里就不再有它（selectModelForTask 的 tier 过滤只看卡池）。
- *
- * 同时重定向 agent.defaultModel：指向 v4pro 时改指 deepseek-flash（V4.1），否则
- * 默认模型指向一个已不存在的 id，启动只能落到 models[0] 兜底（静默换模型）。
- *
- * 边界：只动 deepseek provider 下 id 完全等于 'deepseek-v4-pro' 的条目——用户在
- * 别的 provider 下自建的同名模型（第三方中转）不受影响；删空了则不删（空 models
- * 过不了 schema 校验，宁可留一条坏卡也不要让配置整体加载失败）。
- * 幂等：删干净、改到位之后返回 false。Mutates `raw` in place.
- * Returns true if any value was changed.
- */
-export function migrateDeepseekV4ProRetirement(raw: Record<string, unknown>): boolean {
-  const RETIRED = 'deepseek-v4-pro'
-  const RETIRED_ALIAS = 'v4-pro'
-  const REPLACEMENT = 'deepseek-flash'
-  let changed = false
-
-  const provider = raw.provider as Record<string, unknown> | undefined
-  const providers = provider?.providers as Record<string, unknown> | undefined
-  const ds = providers?.['deepseek'] as Record<string, unknown> | undefined
-  const models = ds?.models as Array<Record<string, unknown>> | undefined
-  if (Array.isArray(models)) {
-    const kept = models.filter(m => (m as { id?: unknown })?.id !== RETIRED)
-    if (kept.length !== models.length && kept.length > 0) {
-      ds!.models = kept
-      changed = true
-    }
-  }
-
-  // agent.defaultModel 形如 "provider:modelId"；用 alias 写进去的配置同样接住——
-  // main.ts 按 id 或 alias 匹配，两种写法都合法。
-  const agent = raw.agent as Record<string, unknown> | undefined
-  const dm = agent?.defaultModel
-  if (typeof dm === 'string') {
-    const sep = dm.indexOf(':')
-    const provName = sep >= 0 ? dm.slice(0, sep) : ''
-    const modelName = sep >= 0 ? dm.slice(sep + 1) : ''
-    if (provName === 'deepseek' && (modelName === RETIRED || modelName === RETIRED_ALIAS)) {
-      agent!.defaultModel = `deepseek:${REPLACEMENT}`
-      changed = true
-    }
-  }
-
-  return changed
-}
-
-/**
  * One-shot migration: 退役 deepseek-v4-flash-vision-exp（2026-09-12 决策；官方文档：
  * 旧名仍可调用，但请求由最新的 Flash 承接，即该档已下线）。preset 已删条目，而存量
  * 用户的 models 快照里仍留着它。

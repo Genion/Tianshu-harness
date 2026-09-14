@@ -17,8 +17,10 @@ import { runTypeCheck } from '../../client.js'
  * 并发时更久。too slow for the unit fast path.
  */
 
-/** 全仓 tsc 上限。上限存在的意义是「卡死要被发现」，不是「正常但慢要被误杀」。 */
-const TSC_BUDGET_MS = 240_000
+/** 全仓 tsc 上限。上限存在的意义是「卡死要被发现」，不是「正常但慢要被误杀」。
+ *  负载实测：空闲 35–50s、套件并发下 140–300s+ 波动——240s 预算在重载日会被
+ *  正常命中（test 被 cancel，runTypeCheck 路径该轮零验证），按极端负载 +50% 余量放宽。 */
+const TSC_BUDGET_MS = 420_000
 /**
  * 单用例预算必须高于 `TSC_BUDGET_MS`，否则 node 会先把用例判超时，
  * 我们就拿不到 runTypeCheck 自己的超时诊断。也覆盖 runner 的全局 --test-timeout。
@@ -31,7 +33,16 @@ const TEST_BUDGET_MS = TSC_BUDGET_MS + 60_000
  */
 let typeCheckOnce: Promise<Awaited<ReturnType<typeof runTypeCheck>>> | null = null
 const runOnce = (): Promise<Awaited<ReturnType<typeof runTypeCheck>>> =>
-  (typeCheckOnce ??= runTypeCheck(process.cwd(), '*', TSC_BUDGET_MS))
+  (typeCheckOnce ??= (() => {
+    // 全仓 tsc 空闲 35–50s、并发负载下 200s+（实测 228s），静默期会触发 runner 的
+    // 180s 闲置看门狗把整批误杀为「挂死」（D 波遗留 a 的真凶）。测试进程 stdout
+    // 经 node --test 实时透传（已实测），每 20s 一行心跳保持批次活性。
+    const heartbeat = setInterval(() => {
+      process.stdout.write(`[client-typecheck] tsc still running @${new Date().toISOString()}\n`)
+    }, 20_000)
+    heartbeat.unref()
+    return runTypeCheck(process.cwd(), '*', TSC_BUDGET_MS).finally(() => clearInterval(heartbeat))
+  })())
 
 test('runTypeCheck: require(typescript) loads and returns ranOk=true', { timeout: TEST_BUDGET_MS }, async () => {
   const res = await runOnce()

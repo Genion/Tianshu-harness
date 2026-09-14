@@ -16,12 +16,15 @@ export interface EndpointPaths {
   models: string
   /** Path appended to the base URL for POST minimal completion. */
   chat: string
+  /** Path appended to the base URL for POST image generation (issue #8). */
+  images: string
 }
 
 /** Unified default for OpenAI-compatible endpoints (unknown providers included). */
 export const DEFAULT_ENDPOINT_PATHS: EndpointPaths = {
   models: '/models',
   chat: '/chat/completions',
+  images: '/images/generations',
 }
 
 /**
@@ -37,6 +40,10 @@ export const PROVIDER_ENDPOINT_MAP: Record<string, Partial<EndpointPaths>> = {
 /** Tails users paste from curl/docs that are request paths, not the base URL.
  *  Longest first; the version segment (/v1) stays — it belongs to the base. */
 const STRIPPABLE_SUFFIXES = [
+  // issue #8：注册生图 provider 时，用户最常粘贴的就是完整生图端点 URL
+  // （从 provider 文档的 curl 示例里复制）。不剥这个尾巴，后续拼接会得到
+  // …/images/generations/models → 404，而报错只提 "path may be wrong"。
+  '/images/generations',
   '/chat/completions',
   '/completions',
   '/messages',
@@ -61,6 +68,8 @@ export interface ResolvedProbeEndpoints {
   base: string
   modelsUrl: string
   chatUrl: string
+  /** Image-generation endpoint — used by the image-gen onboarding probe (issue #8). */
+  imagesUrl: string
 }
 
 /**
@@ -79,5 +88,6 @@ export function resolveProbeEndpoints(baseUrl: string, providerName?: string): R
     base,
     modelsUrl: `${base}${prefix}${paths.models}`,
     chatUrl: `${base}${prefix}${paths.chat}`,
+    imagesUrl: `${base}${prefix}${paths.images}`,
   }
 }

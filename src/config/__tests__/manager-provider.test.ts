@@ -24,6 +24,7 @@ import {
 } from '../manager.js'
 import { readSecret, writeSecret, secretsPath } from '../secrets-store.js'
 import { DEFAULT_CONFIG } from '../default.js'
+import { addProviderKey } from '../provider-key-store.js'
 
 describe('provider config mutations', () => {
   let dir = ''
@@ -43,6 +44,22 @@ describe('provider config mutations', () => {
     const provider = loadConfig().provider.providers.deepseek!
     assert.equal(provider.baseUrl, 'https://gateway.example.com/v1')
     assert.equal(provider.models[0]?.id, 'deepseek-v4-flash')
+  })
+
+  it('baseUrl 落库前规范化：剥尾斜杠与从文档复制的完整请求路径 tail', () => {
+    updateProviderBaseUrl('deepseek', 'https://gateway.example.com/v1/')
+    assert.equal(loadConfig().provider.providers.deepseek!.baseUrl, 'https://gateway.example.com/v1')
+
+    updateProviderBaseUrl('deepseek', 'https://gateway.example.com/v1/chat/completions')
+    assert.equal(
+      loadConfig().provider.providers.deepseek!.baseUrl,
+      'https://gateway.example.com/v1',
+      '粘完整请求 URL 必须剥到 base——否则探测绿而请求端双拼 404',
+    )
+  })
+
+  it('baseUrl 非法仍抛错（规范化不放宽校验语义）', () => {
+    assert.throws(() => updateProviderBaseUrl('deepseek', 'not-a-url'), /Invalid provider baseUrl/)
   })
 
   it('updateProviderTunables writes whitelisted fields only', () => {
@@ -779,5 +796,45 @@ describe('setDefaultModelConfig defaultEffort（CC 对标：/model 面板 effort
     assert.equal(getDefaultModelConfig().defaultEffort, null)
     setDefaultModelConfig({ defaultEffort: 'medium' })
     assert.equal(getDefaultModelConfig().defaultEffort, 'medium')
+  })
+})
+
+describe('setDefaultModelConfig 多 key 三段式', () => {
+  let dir = ''
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'rivet-default-model-multikey-'))
+    process.env.RIVET_CONFIG_PATH = join(dir, 'config.json')
+  })
+
+  afterEach(() => {
+    delete process.env.RIVET_CONFIG_PATH
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('第二 key 独有模型：三段式 provider:keyId:modelId 可落盘', () => {
+    setupProvider({ providerName: 'deepseek' })
+    const { id } = addProviderKey('deepseek', {
+      apiKey: 'sk-work',
+      label: '工作号',
+      models: [{ id: 'work-only', contextWindow: 128_000, maxTokens: 8192 }],
+    })
+    const snap = setDefaultModelConfig({ defaultModel: `deepseek:${id}:work-only` })
+    assert.equal(snap.defaultModel, `deepseek:${id}:work-only`)
+    assert.equal(getDefaultModelConfig().defaultModel, `deepseek:${id}:work-only`)
+  })
+
+  it('两段式仍校验顶层/契约并集（单 key 与未迁移路径）', () => {
+    setupProvider({ providerName: 'deepseek' })
+    const snap = setDefaultModelConfig({ defaultModel: 'deepseek:deepseek-v4-flash' })
+    assert.equal(snap.defaultModel, 'deepseek:deepseek-v4-flash')
+  })
+
+  it('三段式 key 不存在或模型不在该 key 上则拒绝', () => {
+    setupProvider({ providerName: 'deepseek' })
+    assert.throws(
+      () => setDefaultModelConfig({ defaultModel: 'deepseek:no-such-key:deepseek-v4-flash' }),
+      /not found/,
+    )
   })
 })

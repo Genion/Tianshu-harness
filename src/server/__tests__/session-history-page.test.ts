@@ -285,7 +285,16 @@ test('GET /stream 回放最前发出 replay_window 元事件', async () => {
   })
   const routes = buildSessionRoutes(mgr, TOKEN)
   const { res, writes } = mockRes()
-  await routes['GET /sessions/:id/stream']!({}, { id: 'long', since: '0' }, AUTH, res)
+  // 本测试断言逐条回放的帧数；回放合并（replay-compaction.ts）单独由
+  // session-replay-compaction.test.ts 覆盖，这里显式关掉以隔离关注点。
+  const prevCompact = process.env.RIVET_REPLAY_COMPACT
+  process.env.RIVET_REPLAY_COMPACT = '0'
+  try {
+    await routes['GET /sessions/:id/stream']!({}, { id: 'long', since: '0' }, AUTH, res)
+  } finally {
+    if (prevCompact === undefined) delete process.env.RIVET_REPLAY_COMPACT
+    else process.env.RIVET_REPLAY_COMPACT = prevCompact
+  }
 
   const all = writes.join('')
   const firstFrameEnd = all.indexOf('\n\n')

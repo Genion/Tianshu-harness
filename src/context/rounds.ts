@@ -384,6 +384,33 @@ export function groupIntoRoundsOai(messages: OaiMessage[]): OaiRound[] {
   return rounds
 }
 
+/**
+ * O(1)-per-message round count — identical grouping semantics to
+ * groupIntoRoundsOai, without building round objects or running the
+ * per-message character-walk token estimate.
+ *
+ * Exists for runResumePreflightOai, which only needs the count:
+ * `groupIntoRoundsOai(m).length` there cost a full token estimate over all
+ * history on EVERY request build while building a result that was only
+ * measured (issue #139: ~21ms of a 37ms build at 400 rounds; this counter is
+ * ~0.2ms). Parity with the grouping is pinned in rounds-oai.test.ts.
+ */
+export function countRoundsOai(messages: OaiMessage[]): number {
+  let count = 0
+  let i = 0
+  while (i < messages.length) {
+    count++
+    const msg = messages[i]!
+    i++
+    // An assistant tool-call turn absorbs the contiguous tool results that
+    // follow it — that whole run is one round (matches groupIntoRoundsOai).
+    if (msg.role === 'assistant' && hasOaiToolCalls(msg)) {
+      while (i < messages.length && messages[i]!.role === 'tool') i++
+    }
+  }
+  return count
+}
+
 export function computeOaiInvariantStatus(rounds: OaiRound[]): ApiInvariantStatus {
   const status: ApiInvariantStatus = {
     totalRounds: rounds.length,

@@ -6,7 +6,7 @@
  * use these functions instead of platform-dependent Node.js APIs directly.
  */
 import { homedir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { win32 as winPath } from 'node:path'
@@ -197,6 +197,86 @@ export function applyConfiguredGitBashPath(gitBashPath?: string): void {
   process.env['RIVET_GIT_BASH_PATH'] = trimmed
   _cachedGitBash = undefined
   _cachedShell = null
+  // 在飞的异步预热用的是旧 env——让它的结果作废（写回前比对代数）。
+  _shellProbeGen++
+}
+
+/** Async `where <cmd>`（首个命中），与上面三个同步探针同命令同解析。 */
+function whereAsync(cmd: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    try {
+      execFile('where', [cmd], { timeout: 3000, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+        if (err || typeof stdout !== 'string') return resolve(undefined)
+        const first = stdout.split('\n')[0]?.trim()
+        resolve(first && first.length > 0 ? first : undefined)
+      })
+    } catch {
+      resolve(undefined)
+    }
+  })
+}
+
+let _shellPrewarm: Promise<void> | null = null
+/** 缓存代数：applyConfiguredGitBashPath 清缓存时自增，在飞预热写回前比对。 */
+let _shellProbeGen = 0
+
+/**
+ * 异步预热 shell 探针缓存（桌面性能阶段 3，2026-09-13）。
+ *
+ * `findGitBashPath()` / `getShellCommand()` 首次调用要 `spawnSync('where', …)`
+ * 两到四次（每次 50–150ms），sidecar 首秒里由 `GET /environment` 的
+ * `getShellDiagnostics()` 触发，同步卡住主线程、并发路由排队。这里用异步
+ * `where` 取同一批答案，再喂给同一个纯解析器（`resolveGitBashPath` /
+ * `resolveShellCommand`），产物与同步路径相同。非 Windows 无探针，直接就位。
+ * 已缓存则 no-op；同步路径若先到，后到者不覆盖。
+ */
+export function prewarmShellProbes(): Promise<void> {
+  if (_cachedShell && _cachedGitBash !== undefined) return Promise.resolve()
+  if (_shellPrewarm) return _shellPrewarm
+  _shellPrewarm = (async () => {
+    if (!isWin) {
+      if (_cachedGitBash === undefined) _cachedGitBash = null
+      if (!_cachedShell) _cachedShell = resolveShellCommand({ isWindows: false, env: process.env, gitBashPath: null, hasPwsh: () => false })
+      return
+    }
+    const gen = _shellProbeGen
+    const [git, bash, pwsh, powershell] = await Promise.all([
+      whereAsync('git'), whereAsync('bash'), whereAsync('pwsh.exe'), whereAsync('powershell.exe'),
+    ])
+    if (gen !== _shellProbeGen) return
+    if (_cachedGitBash === undefined) {
+      _cachedGitBash = resolveGitBashPath({
+        isWindows: true,
+        env: process.env,
+        whichGit: () => git,
+        whichBash: () => bash,
+        exists: existsSync,
+      })
+    }
+    if (!_cachedShell) {
+      const hits: Record<string, boolean> = { 'pwsh.exe': !!pwsh, 'powershell.exe': !!powershell }
+      _cachedShell = resolveShellCommand({
+        isWindows: true,
+        env: process.env,
+        gitBashPath: _cachedGitBash,
+        hasPwsh: (cmd) => hits[cmd] ?? false,
+      })
+    }
+  })().catch(() => { /* 预热失败无害：同步路径照旧兜底 */ }).finally(() => { _shellPrewarm = null })
+  return _shellPrewarm
+}
+
+/** shell 探针缓存是否已就位（测试/诊断用）。 */
+export function isShellProbeWarm(): boolean {
+  return _cachedShell !== null && _cachedGitBash !== undefined
+}
+
+/** 测试专用：清空 shell 探针缓存与在飞预热（让预热/同步两条路径可比对）。 */
+export function __resetShellProbeCacheForTests(): void {
+  _cachedShell = null
+  _cachedGitBash = undefined
+  _shellPrewarm = null
+  _shellProbeGen++
 }
 
 /** Cached, real-IO Git Bash path probe. */

@@ -93,6 +93,21 @@ export function pluginToolsSnapshot(): PluginToolsSnapshot | null {
   return cache
 }
 
+/**
+ * 在飞暖场的落定信号（永不 reject）：已有缓存或没有在飞 → 立即 resolve。
+ * 桌面性能阶段 3 把启动暖场延后到 listen 之后，createAgent 用它做有界等待，
+ * 让「暖场刚点火、首个会话紧接着进来」不再退化成无插件装配。
+ */
+export function pluginToolsWarmup(): Promise<void> {
+  if (cache || !loading) return Promise.resolve()
+  return loading.then(() => undefined, () => undefined)
+}
+
+/** 暖场是否已点火（在飞或已完成）——测试观察延迟点火用。 */
+export function isPluginWarmStarted(): boolean {
+  return cache !== null || loading !== null
+}
+
 /** 安装/启停/卸载后调用——清缓存并（给了 cwd 就）立即重建，下一个新会话拿到新集合。 */
 export function invalidatePluginToolsCache(config?: PluginConfig, cwd?: string): void {
   cache = null

@@ -63,7 +63,7 @@ import { buildAgentMark, VOID_SYMBOL } from '../agent/void-identity.js'
 import type { TuiApp } from './engine/app.js'
 import type { SlashCommand } from './slash-command-registry.js'
 import type { BootstrapContext } from '../bootstrap.js'
-import type { Config } from '../config/schema.js'
+import type { Config, ProviderConfig } from '../config/schema.js'
 import { isProFeatureEnabled } from '../config/pro-license.js'
 import { loadConfig, saveConfig, registerVisionModelConfig } from '../config/manager.js'
 import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
@@ -91,6 +91,7 @@ import { consumePendingReview, peekPendingReview } from '../agent/post-commit-re
 import { routeReviewWorkflow, type ReviewMode, type ReviewOutcome } from '../agent/review-router.js'
 import type { ChangeSet } from '../agent/review-discipline.js'
 import { HELP_TEXT } from './format/help-text.js'
+import { contractModels } from '../config/contract-models.js'
 
 /**
  * Framework-agnostic mutable ref. Structurally compatible with React's
@@ -112,7 +113,7 @@ export interface SlashHandlerContext {
   maxTokens: number
   availableModels: Array<{ id: string; alias: string; supportsVision?: boolean }>
   onModelSwitch: (modelId: string) => { ok: boolean; error?: string }
-  allProviders: Record<string, { models: Array<{ id: string; alias: string; supportsVision?: boolean }>; userSaved?: boolean }>
+  allProviders: Record<string, ProviderConfig>
   currentProvider: string
   currentSessionId: string
   /**
@@ -702,6 +703,24 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     },
   },
   {
+    // 禅模式用户跳过：立即晋升 full（全量工具面）。可选参数为提示语，不进对话历史。
+    name: '/fast',
+    immediate: true,
+    handler(ctx) {
+      const { parts, pushStatic, setIsStreaming } = ctx
+      const note = parts.slice(1).join(' ').trim()
+      const promoted = ctx.agent.promoteZen('user')
+      pushStatic(createLogEntry({
+        type: 'system',
+        content: promoted
+          ? `禅模式已解除：全量工具面恢复。${note ? `（${note}）` : ''}`
+          : `禅模式未激活或已解除。${note ? `（${note}）` : ''}`,
+      }))
+      setIsStreaming(false)
+      return true
+    },
+  },
+  {
     name: '/compact',
     immediate: true,
     handler(ctx) {
@@ -963,7 +982,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           if (!prov.userSaved) continue
           const marker = provName === ctx.currentProvider ? ' ← current' : ''
           lines.push(`[${provName}]${marker}`)
-          for (const m of prov.models) {
+          for (const m of contractModels(prov)) {
             const isCurrent = m.alias === ctx.model || m.id === ctx.model
             // 视觉标记：v4-flash（纯文本）与 v4.1-flash（原生多模态）这类只差前缀/
             // 一个点的档位并排时，没有标记用户根本分不出哪个能看图。
@@ -3814,9 +3833,12 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   const rollbackTokenRef: MutableRefLike<string | null> = { current: null }
   let cacheHitRate = 0
 
-  const allProviders: Record<string, { models: Array<{ id: string; alias: string }>; userSaved?: boolean }> = {}
+  // 直接透传完整 ProviderConfig：此前的投影只留 {id, alias} 是「keys 池对 TUI
+  // 不可见」的根因——投影把 keys 丢在这一步，下游再怎么改都看不到多 key。
+  // 消费端（/model list）自行走 contractModels 取清单与 key 标签。
+  const allProviders: Record<string, ProviderConfig> = {}
   for (const [name, prov] of Object.entries(ctx.config.provider.providers)) {
-    allProviders[name] = { models: prov.models.map(m => ({ id: m.id, alias: m.alias ?? m.id, supportsVision: m.supportsVision })), ...(prov.userSaved ? { userSaved: true } : {}) }
+    allProviders[name] = prov
   }
 
   function buildHandlerContext(input: string): SlashHandlerContext {
@@ -3825,7 +3847,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
     const metrics = app.getMetrics()
     const maxTokens = metrics?.maxTokens && metrics.maxTokens > 0
       ? metrics.maxTokens
-      : (ctx.provider.models[0]?.contextWindow ?? 128000)
+      : (contractModels(ctx.provider)[0]?.contextWindow ?? 128000)
     const cost = metrics?.cost ?? 0
 
     return {
@@ -3836,7 +3858,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       persist: ctx.persist,
       model: app.getModelInfo().modelName,
       maxTokens,
-      availableModels: ctx.provider.models.map(m => ({ id: m.id, alias: m.alias ?? m.id, supportsVision: m.supportsVision })),
+      availableModels: contractModels(ctx.provider).map(m => ({ id: m.id, alias: m.alias ?? m.id })),
       onModelSwitch: (modelId: string) => {
         try { ctx.agent.abort() } catch {}
         const res = switchAgentRuntime(ctx, modelId)
@@ -3915,7 +3937,9 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       setCacheHitRate: (v: number) => { cacheHitRate = v },
       setSummaryState: () => {},
       mcpManagerRef: { current: ctx.refs.mcpManager },
-      claimStoreRef: { current: ctx.claimStore },
+      // getter 惰性读 ctx——/cd 重建 claimStore 后（bootstrap switchAgentCwd 原地
+      // 更新 ctx.claimStore），/context claims* 等检视命令读到的仍是当前 store。
+      claimStoreRef: { get current() { return ctx.claimStore } },
       banditState: ctx.refs.banditState ?? undefined,
       onDomainChange: (domainName: string | undefined) => {
         app.setSessionStarDomain(domainName)
@@ -4219,7 +4243,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       const existing = Object.entries(cfg.provider.providers).map(([name, p]) => ({
         name,
         label: isProviderPresetKey(name) ? PROVIDER_PRESETS[name].label : name,
-        modelCount: p.models.length,
+        modelCount: contractModels(p).length,
       }))
       app.startConnect(existing, cfg.provider.default)
       return true
@@ -4418,11 +4442,22 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   })
 
   register("/login", {
-    description: "OAuth 登录（codex 等订阅型服务商，浏览器完成授权；无参默认 codex）",
+    description: "登录：/login account（天枢账号，浏览器授权）· /login <provider>（codex 等订阅型服务商，无参默认 codex）",
     immediate: true,
     handler: async ({ app, trimmed }) => {
       // /connect 选 codex 后引导用户来此（此前引导的 /login 是幽灵命令——本注册即闭环）。
-      const provider = trimmed.split(/\s+/)[1]?.trim() || 'codex'
+      const arg = trimmed.split(/\s+/)[1]?.trim()
+
+      // 天枢账号通道。刻意用 `/login account` 而非改无参语义——无参默认 codex
+      // 是既有行为，改掉会让习惯了它的用户突然登错东西。
+      if (arg === 'account') {
+        // 实现在 src/tui/account-login.ts —— slash-commands 是行数棘轮点名的
+        // 巨石（只降不升），编排逻辑放那边，这里只留壳。
+        const { handleAccountLogin } = await import('./account-login.js')
+        return handleAccountLogin(app)
+      }
+
+      const provider = arg || 'codex'
       app.commitStatic(`正在为 ${provider} 发起 OAuth 登录——浏览器将打开授权页（5 分钟有效）…`)
       // 动态 import：登录链路（auth/*）不进主装配，用到才加载
       const { runOAuthLogin, openInBrowser } = await import('../auth/login-flow.js')
@@ -4432,6 +4467,15 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       })
       app.commitStatic(res.ok ? `✅ ${res.message}` : `⚠️ ${res.message}`)
       return true
+    },
+  })
+
+  register("/logout", {
+    description: "登出天枢账号（清除本机 account 凭据；不影响模型 provider 的 OAuth）",
+    immediate: true,
+    handler: async ({ app }) => {
+      const { handleAccountLogout } = await import('./account-login.js')
+      return handleAccountLogout(app)
     },
   })
 

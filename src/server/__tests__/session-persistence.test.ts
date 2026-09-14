@@ -1,7 +1,7 @@
 import './disable-cpu-pool.js' // must precede session-persistence import (worker hangs node:test)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, appendFileSync, readdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, appendFileSync, readdirSync, writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { FileSessionPersistence } from '../session-persistence.js'
@@ -10,6 +10,8 @@ import type { SessionEvent, SessionRecord } from '../session-manager.js'
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'rivet-persist-'))
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 function rec(id: string, over: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -389,6 +391,159 @@ test('appendEvent truncates oversized events to a safety stub', () => {
     assert.ok(log.includes('_truncated'), 'truncation marker present')
     assert.ok(!log.includes('xxxx'), 'original payload not stored')
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── 写链错误分类（agent-16：姊妹链的无限重试会挂住事件循环）────────────
+// 病灶：events 链与 record 链的 catch 对所有错误一律「回填 + 250ms 重试」，
+// 无上限——永久性错误（目录被删/只读 FS/路径被占）下 250ms 定时器链永不终止，
+// 事件循环永不空（node --test 整批挂死的既有形态，claim-store 同款教训）。
+// 修复：错误分类 + 梯度——永久码立即停链；EACCES/EPERM/EBUSY（AV/EDR 秒级锁
+// 会自愈）与未知码连续 N 次失败才转永久；行/记录保留待新 kick 清位重试。
+
+test('短暂 EACCES：events 链锁释放后自愈（梯度重试不依赖新事件）', async () => {
+  const dir = tmp()
+  try {
+    const p = new FileSessionPersistence(dir)
+    p.appendEvent('s1', ev(1, 'user')) // CRITICAL：立即上链
+    await p.flushSessionAsync('s1')
+    const file = join(dir, 's1', 'events.jsonl')
+    const base = statSync(file).size
+
+    chmodSync(file, 0o444) // 短暂锁（AV/EDR 扫描窗口同构）
+    p.appendEvent('s1', ev(2, 'user'))
+    await sleep(600)
+    assert.equal(statSync(file).size, base, '锁未释放时不该写入')
+
+    chmodSync(file, 0o644) // 锁释放
+    await sleep(900)
+    assert.ok(statSync(file).size > base, '锁释放后应自愈落盘——梯度重试不依赖新事件')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('永久错误（events.jsonl 被目录占位 → EISDIR）：立即停链，不留永久定时器', async () => {
+  const dir = tmp()
+  try {
+    const p = new FileSessionPersistence(dir)
+    // events.jsonl 的位置被一个目录占住 → appendFile 恒 EISDIR（重试不改变结果）
+    mkdirSync(join(dir, 's1', 'events.jsonl'), { recursive: true })
+    p.appendEvent('s1', ev(1, 'user'))
+    await sleep(600) // 尝试窗口：若无限重试，此刻已有多次 250ms 循环
+
+    const state = p as unknown as {
+      eventChainFailures?: Map<string, { permanent: boolean }>
+      writeChains?: Map<string, { running: boolean }>
+    }
+    assert.equal(state.eventChainFailures?.get('s1')?.permanent, true, '永久错误应停链')
+    assert.equal(state.writeChains?.get('s1')?.running, false, '写链必须已停止（否则定时器链永不释放）')
+  } finally {
+    // RED 期（未分类的无限重试）链会持续重建目录——先撤占位让链自然收敛再清理，
+    // 否则 rmSync 与链写入竞态（ENOTEMPTY）。停链后这里只是多等一拍。
+    try { rmSync(join(dir, 's1', 'events.jsonl'), { recursive: true, force: true }) } catch { /* gone */ }
+    await sleep(350)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('停链后 flushSessionAsync 快速返回，不空转到超时', async () => {
+  const dir = tmp()
+  try {
+    const p = new FileSessionPersistence(dir)
+    mkdirSync(join(dir, 's1', 'events.jsonl'), { recursive: true }) // EISDIR → 立即停链
+    p.appendEvent('s1', ev(1, 'user'))
+    await sleep(400)
+
+    const t0 = Date.now()
+    await p.flushSessionAsync('s1', 3_000)
+    assert.ok(Date.now() - t0 < 1_500, `停链后 flush 应立即返回（实际 ${Date.now() - t0}ms）`)
+  } finally {
+    // 同前：撤占位让链收敛后再清理（RED 期竞态防护）
+    try { rmSync(join(dir, 's1', 'events.jsonl'), { recursive: true, force: true }) } catch { /* gone */ }
+    await sleep(350)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('record 链：EACCES 耗尽梯度停链；锁释放不自愈；新 saveRecord 清位重试', async () => {
+  const dir = tmp()
+  try {
+    const p = new FileSessionPersistence(dir, { maxTransientWriteRetries: 2 })
+    p.saveRecord(rec('s1'))
+    await sleep(200) // 首写完成
+    const sessDir = join(dir, 's1')
+
+    chmodSync(sessDir, 0o555) // 目录只读 → index.json.tmp 写失败 EACCES
+    p.saveRecord(rec('s1', { lastSeq: 9 }))
+    await sleep(900) // 2 次重试耗尽 → 停链
+
+    const state = p as unknown as { recordChainFailures?: Map<string, { permanent: boolean }> }
+    assert.equal(state.recordChainFailures?.get('s1')?.permanent, true, '梯度耗尽应停链')
+
+    chmodSync(sessDir, 0o755)
+    await sleep(800)
+    const idx = JSON.parse(readFileSync(join(sessDir, 'index.json'), 'utf8')) as { lastSeq: number }
+    assert.equal(idx.lastSeq, 0, '停链后锁释放也不自愈（防无限重试复活）')
+
+    p.saveRecord(rec('s1', { lastSeq: 10 })) // 新记录 = 重试许可
+    await sleep(400)
+    const idx2 = JSON.parse(readFileSync(join(sessDir, 'index.json'), 'utf8')) as { lastSeq: number }
+    assert.equal(idx2.lastSeq, 10, '新 saveRecord 应清位重试成功')
+  } finally {
+    // 恢复写权限让链收敛（RED 期无限重试下 rm 会与重建竞态）再清理
+    try { chmodSync(join(dir, 's1'), 0o755) } catch { /* gone */ }
+    await sleep(350)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// agent-16 审查跟进项：「again 吞一拍」的姊妹链形态。flush 入口 kick 若落在
+// 运行中的链上被吞为 again，链随后梯度耗尽停链——修复前 flush 见停链即返回，
+// 一行也排不掉（shutdown 恰好撞上锁持续期的典型形态）。修复：清位重踢一次。
+test('flushSessionAsync 撞上运行中的写链：链随后耗尽停链时补踢排空', async () => {
+  const dir = tmp()
+  const file = join(dir, 's1', 'events.jsonl')
+  try {
+    const p = new FileSessionPersistence(dir, { maxTransientWriteRetries: 2 })
+    p.appendEvent('s1', ev(1, 'user'))
+    await p.flushSessionAsync('s1')
+    const base = statSync(file).size
+
+    chmodSync(file, 0o444)
+    p.appendEvent('s1', ev(2, 'user'))
+    await sleep(80) // 链第一次失败后的 250ms 退避中（running=true）
+    const flushing = p.flushSessionAsync('s1', 1_500) // 入口 kick 撞运行中链 → again（不清位）
+    await sleep(400) // 链第二次失败 → 梯度耗尽 → 停链
+    chmodSync(file, 0o644) // 锁释放
+    await flushing
+    assert.ok(statSync(file).size > base, 'flush 应补踢已停链的滞留行——锁释放后即排空')
+  } finally {
+    try { chmodSync(file, 0o644) } catch { /* gone */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('flushAllAsync 同款时序：撞上运行中的链、链耗尽停链后补踢排空', async () => {
+  const dir = tmp()
+  const file = join(dir, 's1', 'events.jsonl')
+  try {
+    const p = new FileSessionPersistence(dir, { maxTransientWriteRetries: 2 })
+    p.appendEvent('s1', ev(1, 'user'))
+    await p.flushAllAsync(1_500)
+    const base = statSync(file).size
+
+    chmodSync(file, 0o444)
+    p.appendEvent('s1', ev(2, 'user'))
+    await sleep(80) // 链第一次失败后的退避中
+    const flushing = p.flushAllAsync(1_500) // 入口 kick 撞运行中链 → again（不清位）
+    await sleep(400) // 链第二次失败 → 梯度耗尽 → 停链
+    chmodSync(file, 0o644) // 锁释放
+    await flushing
+    assert.ok(statSync(file).size > base, 'flushAllAsync 应补踢已停链的滞留行')
+  } finally {
+    try { chmodSync(file, 0o644) } catch { /* gone */ }
     rmSync(dir, { recursive: true, force: true })
   }
 })

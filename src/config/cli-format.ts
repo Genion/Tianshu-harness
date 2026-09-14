@@ -10,6 +10,7 @@
 import { color } from '../tui/engine/ansi.js'
 import type { ProviderConfig } from './schema.js'
 import type { McpServerConfig } from '../mcp/config.js'
+import { contractModels } from './contract-models.js'
 
 // ── 颜色常量（chalk 命名色，ansi.ts 的 NAMED_FG_CODES 覆盖） ──
 
@@ -175,7 +176,7 @@ export function formatProviderCard(
   lines.push(`${indent}${key('apiKey')}: ${keyLine}`)
 
   // ── 模型 ──
-  const models = provider.models.map(m => m.alias ?? m.id).join(', ')
+  const models = contractModels(provider).map(m => m.alias ?? m.id).join(', ')
   lines.push(`${indent}${key('models')}: ${c(models, MODEL_COLOR, opts)}`)
 
   if (provider.thinking) {

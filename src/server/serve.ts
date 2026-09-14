@@ -19,7 +19,10 @@ import { buildSessionRoutes } from './session-routes.js'
 import { buildMissionRoutes } from './mission-routes.js'
 import { buildRemoteInfoRoutes } from './remote-info-routes.js'
 import { MissionStore } from './mission-store.js'
-import { buildHealthRoute } from './health-route.js'
+import { buildHealthRoute, createHealthSnapshot } from './health-route.js'
+import { ServerEventBus } from './server-event-bus.js'
+import { SseConnectionRegistry } from './sse-registry.js'
+import { buildServerEventsRoute } from './server-events-route.js'
 import { buildGreetingRoute } from './greeting-route.js'
 import { isAuthorizedRequest } from './auth.js'
 import { LoopHealthMonitor } from './loop-health.js'
@@ -38,7 +41,15 @@ import { CronScheduler, setActiveScheduler } from './cron-scheduler.js'
 import { CronWiring } from './cron-wiring.js'
 import { buildMcpRoutes } from './mcp-api.js'
 import { buildPluginRoutes } from './plugin-api.js'
-import { warmPluginToolsCache } from './plugin-session-cache.js'
+import { pluginToolsWarmup, warmPluginToolsCache } from './plugin-session-cache.js'
+import {
+  PLUGIN_WARM_WAIT_CAP_MS,
+  createServeTimingLogger,
+  isServeTimingEnabled,
+  resolveServeWarmDelayMs,
+  scheduleDeferredWarmup,
+  type DeferredWarmup,
+} from './serve-timing.js'
 import { CronLock } from './cron-lock.js'
 import { TaskRegistry } from './task-registry.js'
 import { JsonTaskStore } from './task-store.js'
@@ -46,9 +57,12 @@ import { SessionRuntimePool } from './session-runtime-pool.js'
 import { loadConfig, getGreetingConfig } from '../config/manager.js'
 import { isRuntimeLeanAspect, resolveSessionPoolOptions } from '../config/runtime-lean.js'
 import { isProFeatureEnabled } from '../config/pro-license.js'
-import { setTargetConventions, applyConfiguredGitBashPath } from '../platform.js'
+import { setTargetConventions, applyConfiguredGitBashPath, prewarmShellProbes } from '../platform.js'
+import { prewarmResolvedEnv } from '../tools/resolved-env.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
-import { resolveApiKey } from '../api/factory.js'
+import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
+import { disambiguateKeyPrefix, findModelInKey, findModelOwner, parseModelRef } from '../config/provider-keys.js'
+import { contractModels } from '../config/contract-models.js'
 import type { OaiMessage } from '../api/oai-types.js'
 import { findRecentUnrecordedWrites, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
 import { createAuthProvider } from '../auth/registry.js'
@@ -85,6 +99,11 @@ export function loadServeAgent(): Promise<ServeAgentModule> {
     })
   }
   return serveAgentPromise
+}
+
+/** serve-agent chunk 是否已开始 import（在飞或已完成）——测试观察 listen 后延迟预热用。 */
+export function isServeAgentLoadStarted(): boolean {
+  return serveAgentPromise !== null || serveAgentMod !== null
 }
 
 export function _resetServeAgentForTests(): void {
@@ -149,9 +168,11 @@ export function resolveServeContext(loader: () => Config = loadConfig): ServeCon
   // When the default provider has no models, fall back to the first
   // available model across all providers (or a minimal placeholder) so
   // the UI can still enumerate models in the setup flow.
-  const model = provider.models[0]
+  // 多 key：模型取自 keys 池派生（contractModels）——顶层 models 是迁移时的快照，
+  // 直接读它可能取到已删除的模型或漏掉 key 池里的模型。
+  const model = contractModels(provider)[0]
     ?? Object.values(config.provider.providers)
-      .flatMap(p => p.models)[0]
+      .flatMap(p => contractModels(p))[0]
     ?? { id: 'unknown', maxTokens: 4096, contextWindow: 128_000 }
 
   return { config, provider, model, apiKey, auth, configured }
@@ -188,6 +209,8 @@ export interface ResolvedModelSpec {
   apiKey: string
   auth?: AuthProvider
   model: { id: string; maxTokens: number; contextWindow: number; reasoningEffort?: ModelConfig['reasoningEffort']; capabilities?: ModelConfig['capabilities'] }
+  /** 命中模型所属的 key（多 key provider）；未迁移 provider 无此字段。 */
+  keyId?: string
 }
 
 /**
@@ -197,12 +220,14 @@ export interface ResolvedModelSpec {
  *
  * `provider:modelId`（或 `provider:alias`）显式消歧——deepseek 与 deepseek-spark
  * 共享同一 wire 型号名时，裸 id 仍优先扫到的第一个节点（兼容旧会话），带前缀
- * 则只查该 provider。
+ * 则只查该 provider。`provider:keyId:modelId` 钉到具体 key。
  */
 export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedModelSpec | null {
-  const colon = modelId.indexOf(':')
-  const pinnedProvider = colon > 0 ? modelId.slice(0, colon) : undefined
-  const modelRef = pinnedProvider ? modelId.slice(colon + 1) : modelId
+  // 消歧义统一走 disambiguateKeyPrefix（provider-keys.ts）——它把「中间段是不是
+  // keyId」的判据收成单一事实源。此前 serve 与 main.ts 各写一份，main.ts 那侧漂了
+  // 很久（`ollama:qwen3:32b` 被当成 keyId → 模型/凭据双错），两侧注释却都写着「同语义」。
+  const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
+    disambiguateKeyPrefix(ctx.config.provider.providers, parseModelRef(modelId))
   if (!modelRef) return null
 
   const entries = pinnedProvider
@@ -213,8 +238,13 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
     : Object.entries(ctx.config.provider.providers)
 
   for (const [provName, prov] of entries) {
-    const found = prov.models.find((m) => m.id === modelRef || m.alias === modelRef)
-    if (!found) continue
+    // 多 key：模型归属 key（provider → keys → models）。keyId 前缀走精确槽查找，
+    // 否则取第一个命中的 key；未迁移 provider 单池回退（owner=null → 沿用
+    // provider 级链，行为与迁移前一致）。
+    const owner = pinnedKeyId ? findModelInKey(prov, pinnedKeyId, modelRef) : findModelOwner(prov, modelRef)
+    if (!owner) continue
+    const found = owner.model
+    const ownerKey = owner.owner
 
     let provider = ctx.provider
     let apiKey = ctx.apiKey
@@ -233,10 +263,28 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
         auth = oauth
       }
     } else {
-      const provKey =
-        prov.apiKey ??
-        process.env[prov.apiKeyEnv ?? ''] ??
-        (() => { try { return resolveApiKey(prov) } catch { return undefined } })()
+      // provider 级链：未迁移 provider 与其槽位全空的 key 都走它，与迁移前一致。
+      const providerLevelKey = (): string | undefined =>
+        prov.apiKey
+        ?? process.env[prov.apiKeyEnv ?? '']
+        ?? (() => { try { return resolveApiKey(prov) } catch { return undefined } })()
+
+      // key 配了任一凭据槽 → 只用它（keyRef 实时读 secrets；解析失败即 fail-closed，
+      // 绝不静默改用别的 key 或 provider 级凭据——多账号并行下用错 key 比拿不到
+      // key 更糟）。
+      let provKey: string | undefined
+      if (ownerKey && (ownerKey.keyRef || ownerKey.apiKey || ownerKey.apiKeyEnv)) {
+        try {
+          provKey = resolveCredentialKey({
+            name: provName,
+            keyRef: ownerKey.keyRef,
+            apiKey: ownerKey.apiKey,
+            apiKeyEnv: ownerKey.apiKeyEnv,
+          })
+        } catch { provKey = undefined }
+      } else {
+        provKey = providerLevelKey()
+      }
       // 无 key 的 provider 跳过继续扫（2026-09-06 修复）：裸模型名/别名在多
       // provider 间撞名是常态（opus/sonnet/glm 在内置与自定义间大量重复），
       // 此前这里直接 return null 放弃整个扫描——撞上排在前面的无 key provider
@@ -262,6 +310,7 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
         contextWindow: found.contextWindow,
         reasoningEffort: found.reasoningEffort,
       },
+      ...(ownerKey?.id ? { keyId: ownerKey.id } : {}),
     }
   }
   return null
@@ -274,15 +323,19 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
  * → 'unknown-model'；找得到但解析仍失败 → 'key-missing'（该 provider 无可用 key）。
  */
 export function classifyModelSpecMiss(config: Config, modelId: string): 'unknown-model' | 'key-missing' {
-  const colon = modelId.indexOf(':')
-  const pinnedProvider = colon > 0 ? modelId.slice(0, colon) : undefined
-  const modelRef = pinnedProvider ? modelId.slice(colon + 1) : modelId
+  // 与 resolveModelSpec 同一套消歧义 —— 否则 `provider:keyId:modelId` 与
+  // 「模型 id 自带冒号」两种形态的未命中会被误判成 unknown-model。
+  const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
+    disambiguateKeyPrefix(config.provider.providers, parseModelRef(modelId))
   if (!modelRef) return 'unknown-model'
   const entries = pinnedProvider
     ? (config.provider.providers[pinnedProvider] ? [[pinnedProvider, config.provider.providers[pinnedProvider]] as const] : [])
     : Object.entries(config.provider.providers)
   for (const [, prov] of entries) {
-    if (prov.models.some((m) => m.id === modelRef || m.alias === modelRef)) return 'key-missing'
+    // 与 resolveModelSpec 同一套归属查找（含 keyId 前缀），否则
+    // `provider:keyId:modelId` 的未命中会被误判成 unknown-model。
+    const owner = pinnedKeyId ? findModelInKey(prov, pinnedKeyId, modelRef) : findModelOwner(prov, modelRef)
+    if (owner) return 'key-missing'
   }
   return 'unknown-model'
 }
@@ -329,21 +382,64 @@ export function providerHasUsableAuth(provName: string, prov: ProviderConfig): b
       return false
     }
   }
+  // 多 key（PR-3）：顶层槽或任一把 key 的槽能解出凭据即算可用——只看顶层会让
+  // 「凭据只挂在第 2 把 key 上」的 provider 从 picker 里消失。
   try {
-    return resolveApiKey(prov).length > 0
-  } catch {
-    return false
-  }
+    if (resolveApiKey(prov).length > 0) return true
+  } catch { /* 顶层链落空，继续看 key 池 */ }
+  return (prov.keys ?? []).some(key => {
+    if (!(key.keyRef || key.apiKey || key.apiKeyEnv)) return false
+    try {
+      return resolveCredentialKey({ name: provName, keyRef: key.keyRef, apiKey: key.apiKey, apiKeyEnv: key.apiKeyEnv }).length > 0
+    } catch { return false }
+  })
 }
 
 /** Enumerate every selectable model across all usable providers. */
-export function listAllModels(ctx: ServeContext): { id: string; alias: string; provider: string; providerLabel: string; contextWindow?: number; description?: string }[] {
-  const out: { id: string; alias: string; provider: string; providerLabel: string; contextWindow?: number; description?: string }[] = []
+export function listAllModels(ctx: ServeContext): {
+  id: string
+  alias: string
+  provider: string
+  providerLabel: string
+  contextWindow?: number
+  description?: string
+  keyId?: string
+  keyLabel?: string
+}[] {
+  const out: {
+    id: string
+    alias: string
+    provider: string
+    providerLabel: string
+    contextWindow?: number
+    description?: string
+    keyId?: string
+    keyLabel?: string
+  }[] = []
   for (const [provName, prov] of Object.entries(ctx.config.provider.providers)) {
     // 只列可用 provider——无 key 云端 / 未认证 oauth 的预设模型不进 picker。
     if (!providerHasUsableAuth(provName, prov)) continue
     const providerLabel = resolvePresetLabel(provName) ?? provName
-    for (const m of prov.models) {
+    // 多 key（PR-3）：逐 key 列出，条目带 keyId/keyLabel 供撞名区分；未迁移
+    // provider 走 contractModels（= 顶层快照）。
+    if (prov.keys && prov.keys.length > 0) {
+      for (const key of prov.keys) {
+        for (const m of key.models) {
+          out.push({
+            id: m.id,
+            alias: m.alias ?? m.id,
+            provider: provName,
+            providerLabel,
+            contextWindow: m.contextWindow,
+            description: m.description,
+            keyId: key.id,
+            ...(key.label ? { keyLabel: key.label } : {}),
+          })
+        }
+      }
+      continue
+    }
+    for (const m of contractModels(prov)) {
       out.push({ id: m.id, alias: m.alias ?? m.id, provider: provName, providerLabel, contextWindow: m.contextWindow, description: m.description })
     }
   }
@@ -362,7 +458,7 @@ export function listAllModels(ctx: ServeContext): { id: string; alias: string; p
 export function listAllModelsWithReload(
   ctx: ServeContext,
   reload: () => ServeContext = resolveServeContext,
-): { id: string; alias: string; provider: string; providerLabel: string; contextWindow?: number; description?: string }[] {
+): ReturnType<typeof listAllModels> {
   try {
     return listAllModels(reload())
   } catch {
@@ -534,9 +630,13 @@ const DEFAULT_PORT = 3100
  * API. Throws if no token is available (fail-closed).
  */
 export async function runServe(opts: RunServeOptions = {}): Promise<RunningServer> {
+  // 启动阶段时间线（默认进 sidecar 日志；RIVET_SERVE_TIMING=0 关，见 serve-timing.ts）。
+  const timing = createServeTimingLogger(isServeTimingEnabled(opts))
+  timing.mark('start', `pid=${process.pid}`)
   // Pro 扩展点加载（spec 3b）：桌面 sidecar 生产路径。必须在 config-routes
   // 首次查询之前完成——否则 spark 节点不可见（合并视图查不到注册项）。
   await loadProModule()
+  timing.mark('pro-module')
 
   const apiToken = (opts.token ?? process.env.RIVET_SERVER_TOKEN)?.trim()
   if (!apiToken) {
@@ -554,11 +654,21 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // the CURRENT on-disk key, not the startup snapshot's. Only wired when the
   // context came from disk — an injected context (tests) stays deterministic.
   const specReload = opts.context ? undefined : resolveServeContext
-  // 插件暖场（2026-09-12 sidecar 插件装配补齐）：启动期先跑一次
-  // initializePlugins 进暖场缓存——buildSessionStores 同步合入快照
-  // （serve-agent.ts），Node 模块缓存随后使命中，每会话零等待。
-  warmPluginToolsCache(ctx.config.plugins, process.cwd())
+  // 插件暖场（2026-09-12 sidecar 插件装配补齐）：跑一次 initializePlugins 进暖场
+  // 缓存——buildSessionStores 同步合入快照（serve-agent.ts），Node 模块缓存随后使
+  // 命中，每会话零等待。桌面性能阶段 3（2026-09-13）：点火挪到 listen 之后延迟
+  // （见下方 scheduleDeferredWarmup），首个会话的 createAgent 会提前拉响并做有界等待。
+  let warmup: DeferredWarmup | null = null
   const startedAt = Date.now()
+  // 阶段 4 全局推送通道：会话 / 任务变化的失效提示总线，经 GET /events 推给桌面端
+  // （替代 /sessions 2s、/tasks 5s 的固定轮询；客户端保留慢速兜底）。
+  const serverEvents = new ServerEventBus()
+
+  // agent-13：SSE 活动连接注册表。三条长连（/events、/sessions/:id/stream、
+  // /prompt）只挂 res.on('close') 清理——服务端关停时不会触达，必须由 close
+  // 链 closeAll() 主动清场（见 finish）。没有它时桌面客户端连着 → SIGINT 后
+  // server.close(cb) 永不回调，进程只能 kill -9。
+  const sseRegistry = new SseConnectionRegistry()
 
   // R1 — one shared SessionRegistry for the whole sidecar. Created async (the
   // SQLite backend dynamic-imports better-sqlite3); sessions are created
@@ -631,6 +741,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
       const mcpStates = mgr.getStates()
       const connected = mcpStates.filter(s => s.status === 'connected').length
       const failed = mcpStates.filter(s => s.status === 'error' || s.status === 'degraded')
+      timing.mark('mcp', `connected=${connected} failed=${failed.length} tools=${mgr.getAllTools().length}`)
       if (failed.length > 0) {
         // Fail loud: silently missing MCP tools is worse than a noisy boot.
         serverLogger.error(`MCP: ${connected} connected, ${mgr.getAllTools().length} tools, ${failed.length} failed:`, {
@@ -640,6 +751,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
         serverLogger.warn(`MCP: ${connected} servers connected, ${mgr.getAllTools().length} tools`)
       }
     } catch (err) {
+      timing.mark('mcp', 'failed=init')
       serverLogger.error('MCP initialization failed:', { error: (err as Error)?.message ?? String(err) })
     }
   })()
@@ -661,7 +773,17 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     // 'suggest'）——与 create-agent-config 的透传同口径，窄化强转。
     globalApprovalMode: ctx.config.agent.approval as import('../agent/loop-types.js').ApprovalMode,
     createAgent: async (cwd, sessionId, approvalMode, modelId, allowedTools) => {
-      const agentMod = await loadServeAgent()
+      // 首个会话可能早于延迟预热到点——立刻拉响（幂等），并给插件快照一个有界
+      // 等待窗：agent chunk import 本身就要几百 ms，插件扫描通常在其内落定；
+      // 超窗则按既有语义无插件装配，绝不让一个卡住的插件 import 拖死会话创建。
+      warmup?.fireNow()
+      const [agentMod] = await Promise.all([
+        loadServeAgent(),
+        Promise.race([
+          pluginToolsWarmup(),
+          new Promise<void>((resolve) => { setTimeout(resolve, PLUGIN_WARM_WAIT_CAP_MS).unref() }),
+        ]),
+      ])
       // Capture the goal-handles resolver on first load (dynamic import is
       // cached, so this runs once). Used by resolveGoalHandles below.
       if (!goalHandlesResolve && typeof agentMod.resolveGoalHandles === 'function') {
@@ -720,7 +842,11 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
       return Number.isFinite(n) && n >= 0 ? n : undefined
     })(),
     missionStore,
+    onSessionsChanged: (reason) => serverEvents.publish('sessions_changed', reason),
   })
+
+  // 构造函数内已完成 rehydrate（persistence 存在时）——此处的会话数即盘上恢复量。
+  timing.mark('rehydrate', `sessions=${sessions.listAllSessions().length}`)
 
   // Wave 3 (内存回收): idle release / archive / hardDelete 都经 manager 释放
   // stores——晚绑定到 serve-agent 的 forgetSessionStores（动态 import 后捕获）。
@@ -781,6 +907,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
         start: () => sessions.run(rec.id, prompt),
       }
     },
+    sseRegistry,
   })
 
   // Multi-session routes (M0.5 → M3): /sessions/*. R3 rollback routes consult
@@ -789,6 +916,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // 重读磁盘最新 config；409 低频失败路径，reload 成本可接受）。
   Object.assign(routes, buildSessionRoutes(sessions, apiToken, () => sessionRegistry, ctx.config, {
     reloadConfig: () => resolveServeContext().config,
+    sseRegistry,
   }))
 
   // Mission routes (P1 任务身份化): /missions/* — 与 session-manager 共享同一 store。
@@ -814,6 +942,11 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     // 已烘焙 client 的存活 agent 不换 key（已知边界）。注入式 ctx（测试）不接线，
     // 与 specReload 同判定，保持注入上下文确定性。
     onProviderConfigChanged: opts.context ? undefined : () => refreshServeContext(ctx),
+    // 生图槽配置落盘 → 存活 agent 重算工具表（issue #8）：`generate_image` 的
+    // isEnabled 随槽配置翻转，而工具定义是 agent 构建时快照给 promptEngine 的——
+    // 不刷新的话当前会话看不到它（用户表现为「配置成功但工具不出现」）。与上面两个
+    // hook 同属「落盘后对存活 agent 广播」；注入式 ctx（测试）不接线，保持确定性。
+    onImageGenConfigChanged: opts.context ? undefined : () => { sessions.refreshAgentTools() },
   }))
 
   // Environment route: host toolchain availability (python, uv, git, node) for setup UI.
@@ -887,7 +1020,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     try {
       const { spawn } = await import('node:child_process')
       await new Promise<void>((resolve, reject) => {
-        const child = spawn(effectiveCommand.cmd, effectiveCommand.args, { detached: true, stdio: 'ignore' })
+        const child = spawn(effectiveCommand.cmd, effectiveCommand.args, { detached: true, stdio: 'ignore', windowsHide: true })
         child.on('error', reject)
         child.on('spawn', () => { child.unref(); resolve() })
       })
@@ -910,29 +1043,37 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // registryOk lets the desktop tell "sidecar up but concurrency dormant" apart
   // from a healthy sidecar. In ephemeral/test mode (no registry wired) it reads
   // true so existing single-session behavior is unchanged.
+  const registryReady = () => (opts.ephemeral ? true : sessionRegistry !== undefined)
+  const serveConfigured = () => resolveServeContext().configured
+  const loopLagForHealth = () => {
+    const snap = loopHealth.snapshot()
+    // 2026-08-09 卡顿归因遥测：>2s 的事件循环尖峰落 sidecar 日志（带堆/RSS），
+    // 让桌面端 degraded 横幅事后可区分 GC / swap / 同步阻塞（此前横幅亮了
+    // 却无任何数据可查，2026-08-09 首轮响应排查的观测缺口）。仅尖峰时写，
+    // 健康路径零开销。完全卡死时 /health 当窗答不出——尖峰记在恢复后首个
+    // 响应的 maxMs 里（loop-health.ts 注释的窗口语义），正好够归因。
+    if (snap.maxMs > 2000) {
+      const mem = process.memoryUsage()
+      console.warn(
+        `[loop-lag] t=${new Date().toISOString()} event-loop stall: ` +
+        `max=${Math.round(snap.maxMs)}ms p99=${Math.round(snap.p99Ms)}ms ` +
+        `heapUsed=${Math.round(mem.heapUsed / 1048576)}MB rss=${Math.round(mem.rss / 1048576)}MB ` +
+        `handles=${activeHandleSummary()} activities=${stallActivitySummary()}`,
+      )
+    }
+    return snap
+  }
   Object.assign(
     routes,
-    buildHealthRoute(sessions, startedAt, version, apiToken, () =>
-      opts.ephemeral ? true : sessionRegistry !== undefined,
-    () => resolveServeContext().configured,
-    () => {
-      const snap = loopHealth.snapshot()
-      // 2026-08-09 卡顿归因遥测：>2s 的事件循环尖峰落 sidecar 日志（带堆/RSS），
-      // 让桌面端 degraded 横幅事后可区分 GC / swap / 同步阻塞（此前横幅亮了
-      // 却无任何数据可查，2026-08-09 首轮响应排查的观测缺口）。仅尖峰时写，
-      // 健康路径零开销。完全卡死时 /health 当窗答不出——尖峰记在恢复后首个
-      // 响应的 maxMs 里（loop-health.ts 注释的窗口语义），正好够归因。
-      if (snap.maxMs > 2000) {
-        const mem = process.memoryUsage()
-        console.warn(
-          `[loop-lag] t=${new Date().toISOString()} event-loop stall: ` +
-          `max=${Math.round(snap.maxMs)}ms p99=${Math.round(snap.p99Ms)}ms ` +
-          `heapUsed=${Math.round(mem.heapUsed / 1048576)}MB rss=${Math.round(mem.rss / 1048576)}MB ` +
-          `handles=${activeHandleSummary()} activities=${stallActivitySummary()}`,
-        )
-      }
-      return snap
-    }),
+    buildHealthRoute(sessions, startedAt, version, apiToken, registryReady, serveConfigured, loopLagForHealth),
+  )
+  // 阶段 4：GET /events 全局推送通道——sessions/tasks 失效提示 + 5s health 心跳
+  // （心跳体与带 token 的 GET /health 同一构造点，前端直接 setQueryData）。
+  Object.assign(
+    routes,
+    buildServerEventsRoute(serverEvents, apiToken, {
+      healthSnapshot: createHealthSnapshot(sessions, startedAt, version, registryReady, serveConfigured, loopLagForHealth),
+    }, sseRegistry),
   )
 
   // Greeting route: algorithm templates + flash LLM for the desktop welcome page.
@@ -956,7 +1097,11 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     const rivetDir = desktopDir()
     scheduler = new CronScheduler({ schedulePath: join(rivetDir, 'scheduled_tasks.json') })
     setActiveScheduler(scheduler)
-    const registry = new TaskRegistry({ taskStore: new JsonTaskStore(join(rivetDir, 'tasks')) })
+    const registry = new TaskRegistry({
+      taskStore: new JsonTaskStore(join(rivetDir, 'tasks')),
+      // 阶段 4：任务创建 / 状态转换 → 推送通道失效提示（替代 /tasks 5s 轮询）。
+      onEvent: (ev) => serverEvents.publish('tasks_changed', ev.type),
+    })
     taskRegistry = registry
     const runtimePool = new SessionRuntimePool({ manager: sessions, defaultCwd: process.cwd() })
     // CronLock: with multiple sidecars pointed at the same desktop dir, exactly
@@ -988,27 +1133,41 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // 抓栈（2026-09-08 write_file 挂起两次复现均无日志的教训）。懒安装兜底
   // 已覆盖未显式接线入口；此处显式安装保证 serve 启动即观测。
   installStallObserver()
+  timing.mark('routes')
   const listenT0 = performance.now()
   const server = await startServer(port, routes, apiToken, { host, allowedHosts, mobileDir })
-  if (process.env.RIVET_SERVE_TIMING === '1') {
-    console.error(`[serve-timing] listen ready ${Math.round(performance.now() - listenT0)}ms (since runServe start ${Date.now() - startedAt}ms)`)
-  }
-  // Warm the agent-assembly chunk in the background so the first session
-  // doesn't pay the full dynamic-import tax on the critical path.
-  void loadServeAgent()
+  timing.mark('listen', `bind=${Math.round(performance.now() - listenT0)}ms wall=${Date.now() - startedAt}ms`)
+  // 宿主探针预热（异步 spawn，不占主线程）：reg query 两个 hive + where git/bash/pwsh。
+  // 首批 UI 请求里的 GET /environment 此前是这些探针的首个调用方，同步 spawnSync
+  // 卡主线程几百 ms，并发的 /config/* 与 /git/branches 全排在它后面——实测就是
+  // 「就绪后首秒所有路由 300–600ms」的主因（agent chunk 预热只是次因）。
+  void Promise.all([prewarmResolvedEnv(), prewarmShellProbes()])
+    .then(() => timing.mark('host-probes'))
+  // 预热（agent 装配 chunk import + 插件快照）延后到 listen 之后：首批 UI 请求
+  // （/health、/sessions、/config/*）先过，再让预热吃 CPU。首个会话经 createAgent
+  // 的 fireNow 即时触发，不等定时器；close 时取消未点火的定时器。
+  warmup = scheduleDeferredWarmup(() => {
+    timing.mark('warm-start')
+    warmPluginToolsCache(ctx.config.plugins, process.cwd())
+    void pluginToolsWarmup().then(() => timing.mark('plugins-warm'))
+    void loadServeAgent()
+      .then(() => timing.mark('serve-agent-loaded'))
+      .catch(() => { /* createAgent 路径会带着真实错误重试 */ })
+  }, resolveServeWarmDelayMs())
   return {
     port,
     sessions,
     scheduler,
     shared: sharedRuntime,
     close: (cb) => {
+      warmup?.cancel()
       // Legacy /prompt runs live on manager sessions too — abortAll covers both.
       sessions.abortAll()
       // Wave L: 与 TUI createShutdownHandler 对称——abort 中止 turn 后，对所有
       // session 显式 shutdown 释放 coordinator stallSweep + 在途 worker 句柄。
       // 共享资源要等 claims/worker finally 完成后再拆，避免 handoff 紧接着
       // 进入同一工作区时撞上上一会话的文件归属。
-      const finish = () => {
+      const finish = async () => {
         void wiring?.stop()
         wiring?.dispose()
         taskRegistry?.dispose()
@@ -1025,7 +1184,20 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
           sharedRuntime.domainStores.clear()
         }
         loopHealth.stop()
+        // agent-16：会话事件写链（100ms debounce 批次）有界排空——CRITICAL 之外的
+        // 滞留行否则随进程退出丢失（flushAllAsync 此前只有测试调用，生产关闭链
+        // 缺这一环）。有界超时，best-effort。
+        try { await persistence?.flushAllAsync(3_000) } catch { /* best-effort */ }
+        // agent-13：先主动清场 SSE 长连（/events、/sessions/:id/stream、/prompt）。
+        // 它们只挂 res.on('close') 清理，服务端不主动关则 server.close(cb) 永远
+        // 等不到回调——桌面客户端连着时 SIGINT 只能 kill -9 的根因。
+        // closeAll 发 done 帧 + end → 客户端读到 EOF 走退避重连。
+        sseRegistry.closeAll()
+        serverEvents.close()
         server.close(cb)
+        // closeAll 的 res.end 让 socket 转入 keep-alive 空闲态、仍阻塞 close
+        // 回调（实测要等 5s keepAliveTimeout）——立即回收让退出即时完成。
+        server.closeIdleConnections()
       }
       void sessions.shutdownAll().then(finish, finish)
     },
@@ -1192,7 +1364,25 @@ export async function serveCommand(args: string[]): Promise<void> {
     process.exit(1)
   }
 
+  let shuttingDown = false
   const shutdownServer = () => {
+    if (shuttingDown) {
+      // 二次信号 = 用户明确等不了——跳过优雅链立即强退（CLI 惯例；此前被幂等
+      // 守卫静默吞掉，用户只能干等保险丝）。
+      console.error('[serve] second signal — forcing immediate exit')
+      process.exit(1)
+    }
+    shuttingDown = true
+    // 保险丝：优雅关停链会主动清场长连并退出；任何未预料的悬挂（未来新增的
+    // 长连、半死 socket、finish 某步卡住）都不该让退出无限推迟——超时强制退出，
+    // 绝不再回到「只能 kill -9」。预算对齐设计内慢收尾的最坏值（drainPostSession 5s
+    // + flushWrites 2s 与 shutdownAndWait 8s 并行、flushAllAsync 3s、closeAll）加余量
+    // ——3s 会把设计内慢收尾误判为悬挂并切掉 best-effort 尾写。强退非 0 退出码，
+    // 与干净退出可区分。unref 不影响正常路径的即时 exit。
+    setTimeout(() => {
+      console.error('[serve] graceful shutdown did not finish in 15s — forcing exit')
+      process.exit(1)
+    }, 15_000).unref()
     server.close(() => process.exit(0))
   }
   process.on('SIGINT', () => {

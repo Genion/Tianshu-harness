@@ -24,6 +24,41 @@ describe('collapseToolResult', () => {
     assert.ok(result!.collapsedTokens < result!.originalTokens)
   })
 
+  // ── 台账 F4：静默子集化（2026-09-14）────────────────────────────
+  // 工具层对超大结果返回「head/tail 截断正文 + 全量统计 + artifact 引用」；
+  // 折叠层若用截断后的正文重算行数，会把 head 的 8 行包装成「8 matches in
+  // 4 files」的完整读数（实测 65/20 被抹成 8/4，且无任何残缺标记可辨）。
+  it('含 artifact 的已截断 grep 结果：不重算残缺正文——沿用全量统计', () => {
+    const truncatedHead = [
+      '/repo/src/agent/evidence.ts:1: checkTddGate(',
+      '/repo/src/agent/evidence.ts:2: checkTddGate(',
+      '/repo/src/agent/tdd-gate.ts:215: export function checkTddGate(',
+      '/repo/src/agent/tdd-gate.ts:245: checkTddGate',
+      '/repo/src/agent/context.ts:1: checkTddGate(',
+      '/repo/src/agent/context.ts:2: checkTddGate(',
+      '/repo/src/agent/context.ts:3: checkTddGate(',
+      '/repo/src/agent/turn-step-producer.ts:1132: checkTddGate(',
+    ].join('\n')
+    const content = [
+      truncatedHead,
+      '... (truncated, use offset/limit for more specific ranges)',
+      'grep "checkTddGate|filesRead": 65 matches in 20 files. Files: src/agent/evidence.ts (+15)',
+      '使用 read_section(artifactId="grep:abc", section="L1-L500") 获取完整匹配列表。',
+      '[artifact:grep:abc]',
+    ].join('\n')
+    const result = collapseToolResult('grep', content, 5, 200_000)
+    assert.notEqual(result, null)
+    assert.ok(
+      !result!.summary.includes('8 matches in 4 files'),
+      `折叠不得重算残缺正文的统计：${result!.summary}`,
+    )
+    assert.ok(
+      result!.summary.includes('65 matches in 20 files'),
+      `应沿用工具层的全量统计：${result!.summary}`,
+    )
+    assert.ok(result!.summary.includes('artifact'), `应保留回读句柄：${result!.summary}`)
+  })
+
   it('collapses read_file results with structural info', () => {
     const content = [
       'export class Foo {',

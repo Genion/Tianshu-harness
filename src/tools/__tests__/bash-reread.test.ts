@@ -79,4 +79,15 @@ describe('checkBashReread', () => {
     const w2 = checkBashReread('grep "error message" /etc/hosts', 'id-2')
     assert.ok(w2 !== null, 'same quoted pattern with spaces should trigger reread')
   })
+
+  // ── 台账 F1：key 退化误报（2026-09-14）────────────────────────────
+  // `cd … && npx tsx --test <不同文件> | grep -c '✔'` 这类命令：verb 识别只看
+  // 行首（落 other），grep 模式的「文件路径」捕获吃进引号内统计符号（'✔'）→
+  // 所有同尾巴形态的命令共享 key `other:✔` → 不同命令互相误报。
+  it('不误报：不同测试文件 + 相同管道尾巴（grep -c 统计符号被当文件）', () => {
+    const cmdA = `cd /work && timeout 60 npx tsx --test src/server/__tests__/session-trim-async.test.ts 2>&1 | grep -c '✔'`
+    const cmdB = `cd /work && timeout 60 npx tsx --test src/server/__tests__/session-sparse-index.test.ts 2>&1 | grep -c '✔'`
+    assert.equal(checkBashReread(cmdA, 'f1-1'), null)
+    assert.equal(checkBashReread(cmdB, 'f1-2'), null, '不同文件的同类命令不得因尾巴相同而误报')
+  })
 })

@@ -4,13 +4,18 @@ import { resolve, join, dirname } from 'path'
 import { isProjectTrusted, stripUntrustedProjectKeys, notifyUntrustedOnce, findSensitiveProjectKeys } from './project-trust.js'
 import { z } from 'zod'
 import { resolveProfileName, resolveProfileOverlay, resolveHookDisabledEnv } from './profile.js'
+import { unBakeProfileOverlay } from './profile-persist.js'
 import { configSchema, reviewConfigSchema, workersSchema, councilConfigSchema, editorSchema, mirrorsSchema, prDefaultsSchema, envSchema, uiSchema, permissionsSchema, networkSchema, fetchSchema, searchSchema, modelConfigSchema, type Config, type ProviderConfig, type ModelConfig, type ProviderCapabilitiesConfig, type ProviderAdvancedConfig, type ReviewConfig, type WorkersConfig, type CouncilConfig, type EditorConfig, type MirrorsConfig, type PrDefaultsConfig, type UiConfig } from './schema.js'
 import { DEFAULT_CONFIG } from './default.js'
 import { userConfigPath } from './paths.js'
 import { findPresetModel, isProviderPresetKey, type ProviderPresetKey } from './provider-presets.js'
 import { cloneResolvedPreset, resolvePreset } from '../api/pro-registry.js'
+import { normalizeBaseUrl } from '../api/endpoint-map.js'
 import { backfillPresetModelFields, migratePresetModelBackfill } from './preset-model-backfill.js'
-import { migrateDeepseekV4ProRetirement, migrateDeepseekVisionExpRetirement } from './preset-model-retirement.js'
+import { migrateProviderToKeys, keyRefFor, defaultKeyOf, keyRefReferrers } from './provider-keys.js'
+import { injectProviderKeys, stripProviderKeys, writeProviderKeysFile } from './provider-keys-store.js'
+import { assertDefaultModelRef } from './contract-models.js'
+import { migrateDeepseekVisionExpRetirement } from './preset-model-retirement.js'
 import { writeSecret, readSecret, deleteSecret } from './secrets-store.js'
 import { invalidateToolPreset } from '../tools/tool-preset.js'
 import { invalidatePromptBlocks } from '../prompt/block-policy.js'
@@ -210,6 +215,23 @@ function migrateV4FlashEffort(raw: Record<string, unknown>): boolean {
   return changed
 }
 
+/** 该 apiKeyEnv 是否只是从预设继承来的值（DEFAULT_CONFIG 同名 provider 自带）。 */
+function isInheritedPresetEnv(name: string, apiKeyEnv: unknown): boolean {
+  if (typeof apiKeyEnv !== 'string') return false
+  const def = (DEFAULT_CONFIG.provider.providers as Record<string, { apiKeyEnv?: string } | undefined>)[name]
+  return def?.apiKeyEnv === apiKeyEnv
+}
+
+/** 「用户显式凭证」判据（单一事实源）：keyRef / apiKey 只有用户写入才会出现；
+ *  apiKeyEnv 要与预设值不同才算。消费方：userSaved 打标、多 key 存量迁移——
+ *  两处各写一份会让「哪些 provider 算用户配置过」出现两个答案，而迁移判据一旦
+ *  放宽到「合并后存在凭证」，用户刚设的 key 就会被 keys[0] 静默遮蔽。 */
+function hasUserCredential(name: string, entry: { keyRef?: unknown; apiKey?: unknown; apiKeyEnv?: unknown }): boolean {
+  if (entry.keyRef || entry.apiKey) return true
+  if (typeof entry.apiKeyEnv !== 'string') return false
+  return !isInheritedPresetEnv(name, entry.apiKeyEnv)
+}
+
 /**
  * One-shot migration: plaintext provider.apiKey values in config.json move
  * into the 0600 secrets.json store, leaving only a keyRef pointer behind.
@@ -314,6 +336,8 @@ export function loadConfig(options?: {
   sessionOverlay?: Record<string, unknown>
   /** 显式 profile 名（优先于 RIVET_PROFILE env）。见 profile.ts。 */
   profile?: string
+  /** 内部守卫专用：跳过 profile 层，得到可持久视图（defaults ⊕ user）。 */
+  skipProfileOverlay?: boolean
 }): Config {
   // Layer 1: defaults
   let base = DEFAULT_CONFIG as unknown as Record<string, unknown>
@@ -325,7 +349,6 @@ export function loadConfig(options?: {
     const cpMigrated = migrateLegacyCheckpointInterval(raw)
     const dsChanged = migrateDeepseekMaxTokens(cpMigrated)
     const flashChanged = migrateV4FlashEffort(cpMigrated)
-    const proRetired = migrateDeepseekV4ProRetirement(cpMigrated)
     const visionExpRetired = migrateDeepseekVisionExpRetirement(cpMigrated)
     const keysMoved = migrateInlineApiKeys(cpMigrated)
     const capsChanged = migrateLegacyCapabilities(cpMigrated)
@@ -333,7 +356,7 @@ export function loadConfig(options?: {
     const backfillChanged = migratePresetModelBackfill(cpMigrated)
     // Write back if any migration modified the raw config so the fix
     // persists across restarts (one-shot, idempotent).
-    if (cpMigrated !== raw || dsChanged || flashChanged || proRetired || visionExpRetired || keysMoved || capsChanged || protoChanged || backfillChanged) {
+    if (cpMigrated !== raw || dsChanged || flashChanged || visionExpRetired || keysMoved || capsChanged || protoChanged || backfillChanged) {
       try {
         writeFileAtomicSync(configPath, JSON.stringify(cpMigrated, null, 2) + '\n')
       } catch {
@@ -351,7 +374,6 @@ export function loadConfig(options?: {
     const cpMigrated = migrateLegacyCheckpointInterval(raw)
     migrateDeepseekMaxTokens(cpMigrated)
     migrateV4FlashEffort(cpMigrated)
-    migrateDeepseekV4ProRetirement(cpMigrated)
     migrateLegacyCapabilities(cpMigrated)
     migrateAnthropicProtocol(cpMigrated)
     // 信任门：项目配置可能来自不可信仓库。未授信时剥离安全敏感键再合并
@@ -373,7 +395,9 @@ export function loadConfig(options?: {
   // Layer 3.5: profile overlay（RIVET_PROFILE env / --profile flag，见 profile.ts）。
   // 命名配置覆盖块：$RIVET_HOME/profiles/<name>.json 或内置 lean。位于 project 与
   // session overlay 之间——profile 可覆盖项目配置，session overlay 可覆盖 profile。
-  const profileOverlay = resolveProfileOverlay(resolveProfileName(options?.profile))
+  const profileOverlay = options?.skipProfileOverlay
+    ? {}
+    : resolveProfileOverlay(resolveProfileName(options?.profile))
   if (Object.keys(profileOverlay).length > 0) {
     base = deepMerge(base, profileOverlay)
   }
@@ -406,9 +430,8 @@ export function loadConfig(options?: {
           if (!(key in DEFAULT_CONFIG.provider.providers)) {
             e.userSaved = true
           } else {
-            const def = (DEFAULT_CONFIG.provider.providers as Record<string, { baseUrl?: string; apiKeyEnv?: string }>)[key]
-            const hasCredential = Boolean(e.keyRef) || Boolean(e.apiKey)
-              || (typeof e.apiKeyEnv === 'string' && e.apiKeyEnv !== def?.apiKeyEnv)
+            const def = (DEFAULT_CONFIG.provider.providers as Record<string, { baseUrl?: string }>)[key]
+            const hasCredential = hasUserCredential(key, e)
             const repointed = typeof e.baseUrl === 'string' && typeof def?.baseUrl === 'string' && e.baseUrl !== def.baseUrl
             if (hasCredential || repointed) e.userSaved = true
           }
@@ -432,12 +455,39 @@ export function loadConfig(options?: {
   // Materialize keyRef secrets into in-memory apiKey — runtime consumers read
   // provider.apiKey in ~10 places; disk never sees this value (saveConfig
   // strips it back out for keyRef providers).
-  for (const provider of Object.values(config.provider.providers)) {
+  // 多 key 迁移（PR-3）插在物化之前：幂等合成 keys[0]，未迁移 provider 的顶层
+  // 槽位与 models 原样保留为兼容视图，故下游读取路径行为不变。keys 内的内联
+  // 明文与 provider 级同规迁进 secrets.json——否则 saveConfig 剥明文会丢 key。
+  for (const [name, provider] of Object.entries(config.provider.providers)) {
+    // 判据注入：迁移与 userSaved 打标共用 hasUserCredential——合并后「存在」凭证
+    // 不等于「用户配过」（预设会继承 apiKeyEnv/models），放宽会让 setApiKey 写的
+    // 顶层 keyRef 被合成出来的 keys[0] 静默遮蔽。
+    migrateProviderToKeys(provider, {
+      hasUserCredential: p => hasUserCredential(name, p),
+      isInheritedEnv: env => isInheritedPresetEnv(name, env),
+    })
+    for (const key of provider.keys ?? []) {
+      if (!key.apiKey || key.keyRef) continue
+      const ref = keyRefFor(name, key.id)
+      try {
+        writeSecret(ref, key.apiKey)
+      } catch {
+        continue // secrets 写失败——保留内联值而非丢 key
+      }
+      key.keyRef = ref
+      delete (key as { apiKey?: string }).apiKey
+    }
     if (provider.keyRef && !provider.apiKey) {
       const secret = readSecret(provider.keyRef)
       if (secret) provider.apiKey = secret
     }
   }
+
+  // A′：keys 池权威源改为 provider-keys.json（详见 provider-keys-store.ts 头注）。
+  // 必须放在 migrateProviderToKeys 之后——后者在 config.json 无 keys 时只合成
+  // keys[0]，靠文件覆盖才恢复完整池。
+  injectProviderKeys(config.provider.providers)
+
   return config
 }
 
@@ -446,11 +496,19 @@ export function loadConfigDefault(): Config {
   return loadConfig()
 }
 
+/** 可持久视图（defaults ⊕ user，无 profile 层）——saveConfig 剥 profile 层的基准。 */
+export function loadPersistableConfig(): Config {
+  return loadConfig({ skipProfileOverlay: true })
+}
+
 export function saveConfig(config: Config): void {
   // provider.apiKey is a runtime-only materialized value. Persisted provider
   // credentials must be either keyRef or apiKeyEnv; config.json never receives
   // plaintext API keys, including legacy objects that have no keyRef yet.
   const toWrite = structuredClone(config)
+  // A′：keys 池整体从 config.json 迁出——写进 provider-keys.json，config.json
+  // 只留指针（顶层 keyRef）。不这样做的后果见 loadConfig 的 A′ 说明。
+  const keysFile = stripProviderKeys(toWrite.provider.providers)
   for (const provider of Object.values(toWrite.provider.providers)) {
     provider.apiKey = undefined
     // name === 'anthropic' 的 protocol:'anthropic' 是 providerSchema preprocess 的
@@ -462,6 +520,7 @@ export function saveConfig(config: Config): void {
       delete (provider as unknown as { protocol?: string }).protocol
     }
   }
+
   // 墓碑保全：用户层 providers[name]=null 是「删除内置预设」的标记
   // （deepMerge null=删键，见 deepMerge）。saveConfig 整体重写用户层——不带回
   // 磁盘上既有墓碑的话，下一次任意写配置都会让被删预设从 DEFAULT_CONFIG 复活。
@@ -474,7 +533,14 @@ export function saveConfig(config: Config): void {
       }
     }
   }
+  // profile 层只活在内存——写盘内容永远是 defaults ⊕ user ⊕ setter 本轮的显式改动
+  unBakeProfileOverlay(toWrite, loadPersistableConfig())
+  // 顺序对齐 saveProviderConfigWithSecret 的先例：**先**写 config.json，成功后再写
+  // keys 文件。这样 keys 文件写失败时 config.json 已落盘（旧版可正常跑单 key），
+  // 而绝不出现「config.json 说没有池、keys 文件也没写成」的双丢窗口——池仍在内存
+  // 与下次 loadConfig 的迁移路径里，一次重试即可恢复。
   writeFileAtomicSync(configPath, JSON.stringify(toWrite, null, 2) + '\n')
+  if (Object.keys(keysFile.providers).length > 0) writeProviderKeysFile(keysFile)
 }
 
 /** 把「删除内置预设」的墓碑（providers[name]=null）写进用户层 config.json。
@@ -1267,15 +1333,7 @@ export function setDefaultModelConfig(input: { defaultModel?: unknown; defaultEf
     if (colonIdx < 1 || colonIdx === trimmed.length - 1) {
       throw new Error('defaultModel must be in "provider:modelId" format')
     }
-    const providerName = trimmed.slice(0, colonIdx)
-    const modelId = trimmed.slice(colonIdx + 1)
-    const provider = cfg.provider.providers[providerName]
-    if (!provider) {
-      throw new Error(`Provider "${providerName}" not found in configuration`)
-    }
-    if (!provider.models.some(m => m.id === modelId || m.alias === modelId)) {
-      throw new Error(`Model "${modelId}" not found in provider "${providerName}"`)
-    }
+    assertDefaultModelRef(cfg.provider.providers, trimmed)
     cfg.agent.defaultModel = trimmed
   }
   // defaultEffort（CC 对标）：undefined = 不动；null / 'auto' = 删字段回自动；
@@ -1615,6 +1673,15 @@ export function setApiKey(providerName: string, key: string): void {
   provider.keyRef = providerName
   ;(provider as unknown as { apiKey?: string | null }).apiKey = null
   ;(provider as unknown as { apiKeyEnv?: string | null }).apiKeyEnv = null
+  // 加固（PR-3）：provider 有 keys 池时请求端读的是默认 key 的槽——顶层 keyRef
+  // 写了也不会被读到。不同步过去就会出现「设置里重设了 key，模型仍然切不了」
+  // （症状与迁移判据放宽时一模一样）。
+  const defaultKey = defaultKeyOf(provider)
+  if (defaultKey) {
+    defaultKey.keyRef = providerName
+    defaultKey.apiKey = undefined
+    defaultKey.apiKeyEnv = undefined
+  }
   saveConfig(cfg)
 }
 
@@ -1622,9 +1689,25 @@ export function setApiKeyEnv(providerName: string, envVar: string): void {
   const cfg = loadConfig()
   const provider = cfg.provider.providers[providerName]
   if (!provider) throw new Error(`Provider "${providerName}" not found`)
+  const previousRef = provider.keyRef
   provider.apiKeyEnv = envVar
   ;(provider as unknown as { apiKey?: string | null }).apiKey = null
   ;(provider as unknown as { keyRef?: string | null }).keyRef = null
+  // 加固（PR-3）：同 setApiKey——默认 key 的槽同步成 env 引用，并把只属于它、
+  // 已无人引用的旧 secret 回收。
+  const defaultKey = defaultKeyOf(provider)
+  if (defaultKey) {
+    const keyRef = defaultKey.keyRef
+    defaultKey.apiKeyEnv = envVar
+    defaultKey.keyRef = undefined
+    defaultKey.apiKey = undefined
+    if (keyRef && keyRefReferrers(cfg, keyRef).length === 0 && readSecret(keyRef) !== undefined) {
+      deleteSecret(keyRef)
+    }
+  }
+  if (previousRef && previousRef !== providerName && keyRefReferrers(cfg, previousRef).length === 0 && readSecret(previousRef) !== undefined) {
+    deleteSecret(previousRef)
+  }
   saveConfig(cfg)
 }
 
@@ -1650,22 +1733,32 @@ export function clearApiKey(providerName: string): ClearApiKeyResult {
   const cfg = loadConfig()
   const provider = cfg.provider.providers[providerName]
   if (!provider) throw new Error(`Provider "${providerName}" not found`)
-  const keyRef = provider.keyRef
+  const clearedRefs = new Set<string>()
+  if (provider.keyRef) clearedRefs.add(provider.keyRef)
   ;(provider as unknown as { apiKey?: string | null }).apiKey = null
   ;(provider as unknown as { apiKeyEnv?: string | null }).apiKeyEnv = null
   ;(provider as unknown as { keyRef?: string | null }).keyRef = null
+  // 加固（PR-3）：请求端读的是 keys 池——默认 key 的凭据槽一并清掉，否则
+  // 「已清除」的 key 仍会被 keys[0] 解析出来，UI 显示与实际行为背离。
+  const defaultKey = defaultKeyOf(provider)
+  if (defaultKey) {
+    if (defaultKey.keyRef) clearedRefs.add(defaultKey.keyRef)
+    defaultKey.apiKey = undefined
+    defaultKey.apiKeyEnv = undefined
+    defaultKey.keyRef = undefined
+  }
   saveConfig(cfg)
 
-  // 与 removeProvider 同守卫：keyRef 仍被其他 provider 引用时保留密钥。
+  // 与 removeProvider 同守卫：keyRef 仍被其他 provider/key 引用时保留密钥。
   let secretDeleted = false
-  const keyRefSharedWith = keyRef
-    ? Object.entries(cfg.provider.providers)
-        .filter(([, p]) => p.keyRef === keyRef)
-        .map(([n]) => n)
-    : []
-  if (keyRef && keyRefSharedWith.length === 0 && readSecret(keyRef) !== undefined) {
-    deleteSecret(keyRef)
-    secretDeleted = true
+  const keyRefSharedWith: string[] = []
+  for (const keyRef of clearedRefs) {
+    const referrers = keyRefReferrers(cfg, keyRef)
+    keyRefSharedWith.push(...referrers)
+    if (referrers.length === 0 && readSecret(keyRef) !== undefined) {
+      deleteSecret(keyRef)
+      secretDeleted = true
+    }
   }
   return { name: providerName, keyStatus: getApiKeyStatus(providerName), secretDeleted, keyRefSharedWith }
 }
@@ -1712,12 +1805,20 @@ function assertValidUrl(value: string): void {
   }
 }
 
+/** baseUrl 落库前规范化：校验合法性 + 剥尾斜杠与从文档复制的完整请求路径 tail
+ *  （normalizeBaseUrl 是单一事实源，CLI/TUI 落库同法）——杜绝「探测绿但实际请求
+ *  双拼 404」：用户粘完整请求 URL 时探测端实时 normalize 仍绿，请求端却会双拼。 */
+function resolveProviderBaseUrl(value: string): string {
+  assertValidUrl(value)
+  return normalizeBaseUrl(value)
+}
+
 export function updateProviderBaseUrl(providerName: string, baseUrl: string): void {
-  assertValidUrl(baseUrl)
+  const normalized = resolveProviderBaseUrl(baseUrl)
   const cfg = loadConfig()
   const provider = cfg.provider.providers[providerName]
   if (!provider) throw new Error(`Provider "${providerName}" not found`)
-  provider.baseUrl = baseUrl
+  provider.baseUrl = normalized
   saveConfig(cfg)
 }
 
@@ -1795,7 +1896,7 @@ function applyAdvancedConfig(target: ProviderConfig, advanced?: ProviderAdvanced
 }
 
 /** Persist the config first; a failed secret write must not leave a dangling keyRef. */
-function saveProviderConfigWithSecret(config: Config, previousConfig: Config, keyRef?: string, apiKey?: string): void {
+export function saveProviderConfigWithSecret(config: Config, previousConfig: Config, keyRef?: string, apiKey?: string): void {
   saveConfig(config)
   if (!keyRef || !apiKey) return
   try {
@@ -1826,8 +1927,7 @@ export function setupProvider(options: SetupProviderOptions): void {
   next.name = options.providerName
   if (current) Object.assign(next, current)
   if (options.baseUrl) {
-    assertValidUrl(options.baseUrl)
-    next.baseUrl = options.baseUrl
+    next.baseUrl = resolveProviderBaseUrl(options.baseUrl)
   }
   if (options.apiKey) {
     next.keyRef = options.providerName
@@ -1914,7 +2014,7 @@ export function registerProvider(options: RegisterProviderOptions): void {
       `Use a different name, or configure the preset via "rivet config setup".`,
     )
   }
-  assertValidUrl(options.baseUrl)
+  const normalizedBaseUrl = resolveProviderBaseUrl(options.baseUrl)
   const existing = loadConfig().provider.providers[options.providerName]
   if (existing && !options.force) {
     throw new Error(
@@ -1929,7 +2029,7 @@ export function registerProvider(options: RegisterProviderOptions): void {
     name: options.providerName,
     ...(options.apiKey ? { keyRef: options.providerName } : {}),
     ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
-    baseUrl: options.baseUrl,
+    baseUrl: normalizedBaseUrl,
     protocol: options.protocol ?? 'openai',
     capabilities: options.capabilities ?? {},
     thinking: 'enabled',

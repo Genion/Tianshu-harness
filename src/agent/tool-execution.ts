@@ -28,6 +28,7 @@ import type { ImmuneHook } from './immune-hook.js'
 import type { LspManager } from '../lsp/manager.js'
 import { classifyFailure, isReadProbeInvocation, isTestRunInvocation, type FailureClass } from './failure-classifier.js'
 import { ToolAccumulator } from './tool-accumulator.js'
+import { ZEN_UNLOCK, ZEN_UNLOCK_RESULT, ZEN_UNLOCK_NOT_ZEN } from './zen-mode.js'
 import { guardLossyToolResult } from './negative-fact-detector.js'
 import { getToolStormLevel, type ToolStormLevel } from './trace-store.js'
 import { extractTrailingArtifactId, tierToolResult } from './tool-result-tiering.js'
@@ -155,6 +156,15 @@ export interface ToolExecutionDeps {
   onTddBlocked?: (target?: string) => void
   /** 遥测写入(缺口 B 输出裁剪计数等)。 */
   writeTelemetry?: (record: { kind: string } & Record<string, unknown>) => void
+  /** Zen 解锁点：分派前逐个上报 tool_use 名——zen 相位下面外调用由 loop 侧
+   *  晋升 full 并放行。依赖注入（未注入或 zen 禁用时恒放行）。 */
+  onZenEscape?: (toolName: string) => void
+  /** Zen 解锁声明（zen_unlock）：虚拟工具被调用时触发——loop 侧 promote('tool')。
+   *  与 onZenEscape 互斥触发（zen_unlock 不走面外上报）。 */
+  onZenUnlock?: (toolUseId: string) => boolean | void
+  /** Zen 相位下未注册工具报错的行动指引：返回非空文本时附加到 registry
+   *  Unknown tool 报错后面（幻觉调用不晋升，但给模型 zen_unlock 出路）。 */
+  getZenUnregisteredHint?: (toolName: string) => string | undefined
   beginToolBatchObservability?: (outputMeasured: boolean) => void
   recordSanitizedOutput?: (rawContent: string, sanitizedContent: string, filterId?: string) => void
   recordToolUiEvent?: () => void
@@ -308,6 +318,7 @@ export class ToolExecutionController {
       destructiveGate: this.deps.destructiveGate,
       onGateBlocked: this.deps.onGateBlocked,
       onTddBlocked: this.deps.onTddBlocked,
+      getZenUnregisteredHint: this.deps.getZenUnregisteredHint,
     }
   }
 
@@ -340,6 +351,24 @@ export class ToolExecutionController {
     // 结构化失败分类侧信道：wire 块（tool_result）不携带 errorKind，
     // 按 tool_use_id 记录，postTool hook 的 vigor failureClass 优先消费。
     const errorKindByToolUse = new Map<string, FailureClass>()
+
+    // Zen 解锁点：分派循环前，逐个上报 tool_use——zen 相位下面外调用触发
+    // 晋升 full 后照常执行（放行语义）。promote 是同步状态翻转 + updateTools，
+    // 不阻断本批工具执行；onZenEscape 未注入或 zen 禁用时恒放行。
+    // zen_unlock 是虚拟工具（不在 registry）：收集其 id 供分派时拦截，触发
+    // onZenUnlock（晋升）而非面外上报。
+    const unlockIds = new Set<string>()
+    // 记录真正发生晋升的 id——full 相位幻觉调用 zen_unlock 时 promote 返回
+    // false，结果文案须区分（否则对模型谎报「禅模式已解除」）。
+    const unlockedToFull = new Set<string>()
+    for (const tu of input.toolUses) {
+      if (tu.name === ZEN_UNLOCK) {
+        unlockIds.add(tu.id)
+        if (this.deps.onZenUnlock?.(tu.id) !== false) unlockedToFull.add(tu.id)
+      } else {
+        this.deps.onZenEscape?.(tu.name)
+      }
+    }
 
     // Partition tools into concurrency-safe (parallelizable) and sequential groups.
     // Run contiguous blocks of safe tools in parallel for latency savings.
@@ -379,6 +408,20 @@ export class ToolExecutionController {
         // Sequential execution for non-safe tools
         const { tu } = indexed[cursor]!
         cursor++
+
+        // zen_unlock：虚拟解锁声明工具——不经过 executeToolUse（registry 无此工具），
+        // 直接构造成功结果（解锁已在分派前经 onZenUnlock 完成），并走与正常执行
+        // 一致的 onToolResult 回调（UI/遥测消费方可见解锁确认）。
+        if (unlockIds.has(tu.id)) {
+          const unlockMsg = unlockedToFull.has(tu.id) ? ZEN_UNLOCK_RESULT : ZEN_UNLOCK_NOT_ZEN
+          const unlockBlock: ContentBlock = { type: 'tool_result', tool_use_id: tu.id, content: unlockMsg }
+          toolResults.push(unlockBlock)
+          // 终态标记（isError=false）不可省：UI 把 undefined 解释为「流式中间更新」
+          // → 结果累积进 live 工具卡等待终态；而虚拟工具不会再有第二次回调，那张卡
+          // 会永久悬停（真实用户报告「禅解除提示一直挂在推理区下面」）。
+          callbacks.onToolResult(tu.id, tu.name, unlockMsg, false)
+          continue
+        }
 
         const result = await executeToolUse(
           tu,

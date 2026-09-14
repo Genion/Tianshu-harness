@@ -44,6 +44,30 @@ describe('probe-detector', () => {
       assert.equal(hits.length, 0)
     })
 
+    // ── 台账 F2：三实例（2026-09-14）──────────────────────────────
+    it('不误报：env 门控调试日志（if (__dbg) console.log 形态）', () => {
+      const hits = detectProbes(
+        'if (__dbg) console.log(`[createSession] +${Date.now() - __t0}ms id=${rec.id}`)\n',
+        'src/server/session-routes.ts',
+      )
+      assert.equal(hits.length, 0, '门控调试日志随开关静默，不是遗留探针')
+    })
+
+    it('不误报：desktop/scripts 下的脚本正常输出', () => {
+      const hits = detectProbes('console.log(`[check-mobile-wiring] OK — resources → ${dest}`)\n', 'desktop/scripts/check-mobile-wiring.js')
+      assert.equal(hits.length, 0, 'CLI 脚本的 console.log 是用户可见输出')
+    })
+
+    it('不误报：文档（.md）正文中的 console 引用', () => {
+      const hits = detectProbes('1. `src/server/session-routes.ts:399` 的 `if (__dbg) console.log(…)`\n', 'docs/tasks/x.md')
+      assert.equal(hits.length, 0, '说明性文本不是可执行探针')
+    })
+
+    it('保真：裸 console.log 探针仍被捕获', () => {
+      const hits = detectProbes('console.log("leftover probe")\n', 'src/agent/foo.ts')
+      assert.equal(hits.length, 1)
+    })
+
     it('detects debugger statement', () => {
       const hits = detectProbes('function foo() {\n  debugger\n  return 1\n}\n', 'src/foo.ts')
       assert.equal(hits.length, 1)

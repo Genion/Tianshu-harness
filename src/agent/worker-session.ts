@@ -23,6 +23,7 @@ import { STALL_TOOL_CALL_THRESHOLD, subtractUsage } from './worker-continuation.
 import { clearActivity } from './stall-observer.js'
 import { toolArgSummary } from '../tui/tool-label.js'
 import { buildWorkerPrompt, buildWorkerRepairPrompt, buildFinalizationInstruction, workerOrderHasWriteTools } from './worker-prompts.js'
+import { shouldUseContextFreeRepair, isTruncationStopReason, withTruncationRisk } from './worker-repair-route.js'
 import { reconcileCapturedWorkerFacts } from './worker-evidence.js'
 import { buildWorkerKnowledgeBlock } from './worker-knowledge.js'
 import { buildDomainKnowledgeBlock, formatBatchStigmergyBlock } from './domain-knowledge-block.js'
@@ -616,7 +617,7 @@ async function finalizeWorkerReport(
   session: SessionContext,
   order: WorkOrder,
   hasWriteTools: boolean,
-): Promise<string> {
+): Promise<{ text: string; truncated: boolean }> {
   // 收尾轮不走 AgentLoop，没有任何自然流式事件——先发一条 lifecycle 喂 stall
   // clock，再把 delta 按 'text' 上行（与探索轮同一保活通道）。
   config.onActivity?.('lifecycle', 'finalizing report')
@@ -625,13 +626,14 @@ async function finalizeWorkerReport(
   const toolResult = await attemptWithSubmitTool(config, session, order, hasWriteTools)
   if (toolResult.ok) {
     config.onActivity?.('lifecycle', 'finalize accepted via submit_result tool')
-    return toolResult.text
+    return { text: toolResult.text, truncated: false } // 参数截断已由 argsTruncated 拦在 ok 之前
   }
   // 阶段 2（fallback 一次，同 worker run 不重复白烧）：provider 拒绝工具定义、
   // 零/多/截断 tool-call、参数过不了权威校验，都落到无工具 json_object 终型。
-  const attempt = async (withJson: boolean): Promise<{ text: string; error?: Error }> => {
+  const attempt = async (withJson: boolean): Promise<{ text: string; error?: Error; truncated: boolean }> => {
     let text = ''
     let error: Error | undefined
+    let truncated = false
     await config.client.stream(
       {
         model: config.promptEngine.getModel(),
@@ -649,12 +651,12 @@ async function finalizeWorkerReport(
         onTextDelta: (delta) => { text += delta; config.onActivity?.('text', delta) },
         onThinkingDelta: () => {},
         onContentBlock: () => {},
-        onStopReason: () => {},
+        onStopReason: (reason) => { if (isTruncationStopReason(reason)) truncated = true },
         onError: (e) => { error = e },
       },
       config.abortSignal,
     ).catch((e: unknown) => { error = e as Error })
-    return { text, error }
+    return { text, error, truncated }
   }
   let result = await attempt(Boolean(config.forceJsonRepair))
   if (result.error && config.forceJsonRepair && isResponseFormatRejection(result.error)) {
@@ -663,7 +665,7 @@ async function finalizeWorkerReport(
     result = await attempt(false)
   }
   // 空文本等同失败——调用方回退旧路径（parse 自然输出 / max-turns 阶梯）。
-  return result.error || !result.text.trim() ? '' : result.text
+  return result.error || !result.text.trim() ? { text: '', truncated: false } : { text: result.text, truncated: result.truncated }
 }
 
 /** Soft-landing wrap-up steer, delivered ONCE through the per-tool-round steer
@@ -971,6 +973,7 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
   try {
     const transcript = emptyTranscript()
     let latestText = await runOnceWithTransientRetry(agent, prompt, transcript, config.onActivity, steerDrain, config.onNestedDelegation)
+    let finalizeTruncated = false // 收尾轮在 max_tokens 处被截断——终局失败时透传到 risks
     mbox?.progress(1, config.order.budget.maxRetries + 1, 'initial run')
 
     // Max-turns 熔断判定：初始 run 被 maxTurns 非自愿切断时，累计文本是探索
@@ -1009,9 +1012,10 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
         // B（终轮定型）：报告不再由探索轮自产，统一经带完整会话历史的无工具
         // 收尾轮产出（根治无历史修复编造）。max-turns 非自愿耗尽同样改走终型——
         // 带历史的收尾能如实产出「探索到哪」的报告；终型失败才回退 max-turns 阶梯。
-        const reportText = await finalizeWorkerReport(config, session, config.order, hasWriteTools)
-        if (reportText) {
-          latestText = reportText
+        const finalized = await finalizeWorkerReport(config, session, config.order, hasWriteTools)
+        if (finalized.text) {
+          latestText = finalized.text
+          finalizeTruncated = finalized.truncated
         } else if (maxTurnsExhausted) {
           const run = maxTurnsFallback()
           if (run) return run
@@ -1102,7 +1106,7 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
           if (salvaged) {
             mbox?.progress(config.order.budget.maxRetries + 1, config.order.budget.maxRetries + 1, 'parse-salvaged')
             return {
-              result: salvaged,
+              result: withTruncationRisk(salvaged, finalizeTruncated),
               transcript,
               session,
               usage: sessionUsage(),
@@ -1111,14 +1115,15 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
           const partialSummary = latestText.slice(0, 300)
           const pollutionHint = detectPollutionFailure(transcript)
           const approvalHint = detectApprovalDeadlock(transcript)
+          const blockedResult = {
+            ...buildBlockedWorkerResult(config.order, `Parse failed after ${attempt + 1} attempts: ${message}. Partial: ${partialSummary}${pollutionHint ? ` ${pollutionHint}` : ''}${approvalHint ? ` ${approvalHint}` : ''}`, 'json_parse'),
+            parseErrorKind: classifyWorkerParseError(error) ?? 'json_syntax',
+            artifacts: [
+              { kind: 'note' as const, title: 'Unparseable worker output', content: latestText.slice(0, 2000) },
+            ],
+          }
           return {
-            result: {
-              ...buildBlockedWorkerResult(config.order, `Parse failed after ${attempt + 1} attempts: ${message}. Partial: ${partialSummary}${pollutionHint ? ` ${pollutionHint}` : ''}${approvalHint ? ` ${approvalHint}` : ''}`, 'json_parse'),
-              parseErrorKind: classifyWorkerParseError(error) ?? 'json_syntax',
-              artifacts: [
-                { kind: 'note' as const, title: 'Unparseable worker output', content: latestText.slice(0, 2000) },
-              ],
-            },
+            result: withTruncationRisk(blockedResult, finalizeTruncated),
             transcript,
             session,
             usage: sessionUsage(),
@@ -1129,7 +1134,16 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
         // the combination is safe here (no tools on this turn). Prefer it over
         // the AgentLoop repair loop — it directly forces valid JSON output,
         // short-circuiting the most common parse-failure cause.
-        if (config.forceJsonRepair && !abortLatched) {
+        //
+        // 但它是**无历史单发**（worker-prompts.ts:373 只带尾部 8000 字符）：探索
+        // 过的 worker 看不见自己的工具调用记录，会写出「我没拿到上下文」这类与
+        // 事实矛盾的合法 JSON，并被下游当作正式结论（2026-09-13 假报告事故）。
+        // 故探索过时跳过本通道，落到其后的 AgentLoop 修复（那条带完整会话历史）。
+        if (shouldUseContextFreeRepair({
+          toolUseCount: transcript.toolUses.length,
+          forceJsonRepair: config.forceJsonRepair,
+          abortLatched,
+        })) {
           const repair = await repairWithJsonMode(
             config.client,
             config.promptEngine.getModel(),

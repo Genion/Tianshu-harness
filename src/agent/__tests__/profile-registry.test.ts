@@ -65,6 +65,20 @@ describe('ProfileRegistry', () => {
     assert.equal(p.builtIn, true)
   })
 
+  // 2026-09-13 json_parse 事故：reviewer 未声明 defaultMaxTokens，收尾轮
+  // max_tokens 落 work-order 的 4096 兜底（代码注释声称 16384）——findings
+  // 10+ 条的审查报告被截成畸形 JSON，salvage 后渲染为「review DID NOT run」。
+  it('maps reviewer as readonly with report-sized token budget', async () => {
+    const p = registry.get('reviewer')!
+    assert.ok(p)
+    assert.equal(p.role, 'readonly')
+    assert.equal(
+      p.defaultMaxTokens,
+      16384,
+      '审查报告即主产出——收尾轮输出上限不得落 4096 兜底（与 verifier 族同档）',
+    )
+  })
+
   it('maps patcher as hands with write tools', async () => {
     const p = registry.get('patcher')!
     assert.ok(p)

@@ -687,7 +687,7 @@ describe('AgentLoop — session lifecycle', () => {
     assert.deepEqual(events, ['postSession', 'final'])
   })
 
-  it('runs postSession on AbortError before abort callback', async () => {
+  it('abort callback fires before postSession (postSession detached, drained on demand)', async () => {
     const session = new SessionContext()
     const registry = new ToolRegistry()
     registry.register(READ_FILE_TOOL)
@@ -702,7 +702,9 @@ describe('AgentLoop — session lifecycle', () => {
     }, {
       phase: 'postSession',
       name: 'test-post-session',
-      run: () => { events.push('postSession') },
+      // 慢 hook：detached 链在微任务里跑不完 → run() 返回时 postSession 必须还没跑
+      //（回退到 inline await postSession 的实现会让下面第一条断言立刻变红）。
+      run: async () => { await new Promise(r => setTimeout(r, 30)); events.push('postSession') },
     }])
     const client: StreamClient = {
       stream: mock.fn(async () => {
@@ -724,7 +726,11 @@ describe('AgentLoop — session lifecycle', () => {
       onAbort: () => { events.push('abort') },
     })
 
-    assert.deepEqual(events, ['postSession', 'abort'])
+    // 新契约（2026-09-13 Stop→settle 根治）：onAbort 不再阻塞等 postSession——
+    // 收尾 hooks 进后台串行链，宿主（TUI notifyRunSettled / 服务端 running）立即翻转。
+    assert.deepEqual(events, ['abort'], 'postSession 不得阻塞 onAbort')
+    assert.equal(await agent.drainPostSession(5_000), true)
+    assert.deepEqual(events, ['abort', 'postSession'], '后台链最终执行了 postSession')
   })
 })
 

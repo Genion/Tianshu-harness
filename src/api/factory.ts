@@ -6,9 +6,11 @@ import type { StreamClient } from './stream-client.js'
 import type { ProviderCapabilities } from './provider.js'
 import { getProviderProfile } from './provider-profile.js'
 import { resolveProviderWire } from './provider-catalog.js'
+import { normalizeBaseUrl } from './endpoint-map.js'
 import type { ProviderConfig } from '../config/schema.js'
 import { readSecret } from '../config/secrets-store.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
+import { contractModels } from '../config/contract-models.js'
 import type { AuthProvider } from '../auth/types.js'
 import { PROCESS_SESSION_ID } from './caller-identity.js'
 
@@ -27,6 +29,15 @@ export interface RuntimeParams {
   wireContext?: import('./pro-registry.js').WireTransformContext
 }
 
+/** 凭据槽位形状——provider 与 provider 下的单个 key 共用（PR-3 多 key）。
+ *  `name` 恒为 provider 名：`<NAME>_API_KEY` 兜底与错误文案都按 provider 口径。 */
+export interface CredentialSlots {
+  name: string
+  keyRef?: string
+  apiKey?: string
+  apiKeyEnv?: string
+}
+
 /**
  * Resolve the API key from config, falling back to environment variable.
  *
@@ -41,24 +52,52 @@ export interface RuntimeParams {
  * or deleting/re-entering the key in the desktop UI).
  */
 export function resolveApiKey(provider: ProviderConfig): string {
-  if (provider.keyRef) {
-    const secret = readSecret(provider.keyRef)
-    if (secret) return secret
-  }
-  if (provider.apiKey) return provider.apiKey
-  if (provider.apiKeyEnv) {
-    const env = process.env[provider.apiKeyEnv]
-    if (env) return env
-  }
-  const defaultEnvVar = `${provider.name.toUpperCase()}_API_KEY`
-  const env = process.env[defaultEnvVar]
-  if (env) return env
+  const cred = { name: provider.name, keyRef: provider.keyRef, apiKey: provider.apiKey, apiKeyEnv: provider.apiKeyEnv }
+  // 顺序保真：凭据链全部落空才判 keyless 豁免。预设 keyless（ollama）若用户显式
+  // 配了 key（带鉴权的本地代理 / 远程端点），旧行为用该 key——豁免前置会静默丢弃
+  // 它并发出无 Authorization 的请求。
+  const resolved = tryResolveCredentialKey(cred)
+  if (resolved !== undefined) return resolved
   // keyless 端点（ollama / 未配密钥材料的自定义 provider）免 key——返回空串，
   // 下游对本地端点本就不该带有效 Authorization。需 key 而没配的仍在下方抛错。
   if (isKeylessProviderEntry(provider.name, provider)) return ''
   throw new Error(
     `No API key configured for provider "${provider.name}". ` +
-    `Set apiKey in config or the ${provider.apiKeyEnv ?? defaultEnvVar} environment variable.`
+    `Set apiKey in config or the ${provider.apiKeyEnv ?? `${provider.name.toUpperCase()}_API_KEY`} environment variable.`
+  )
+}
+
+/** 三槽解析的非抛出形态（provider 级与 key 级共用）：keyRef→apiKey→apiKeyEnv→
+ *  `<NAME>_API_KEY` 全部落空返回 undefined，由调用方决定 keyless 豁免还是抛错。
+ *  导出供「尽力而为」的消费方使用（provider-cli 的探测路径）——它们要的就是
+ *  这个语义，此前各写一份平行实现，正是漂移的来源。 */
+export function tryResolveCredentialKey(cred: CredentialSlots): string | undefined {
+  const { name, keyRef, apiKey, apiKeyEnv } = cred
+  if (keyRef) {
+    const secret = readSecret(keyRef)
+    if (secret) return secret
+  }
+  if (apiKey) return apiKey
+  if (apiKeyEnv) {
+    const env = process.env[apiKeyEnv]
+    if (env) return env
+  }
+  const env = process.env[`${name.toUpperCase()}_API_KEY`]
+  if (env) return env
+  return undefined
+}
+
+/** key 级三槽解析（keys[].apiKey/apiKeyEnv/keyRef + provider 名做 env 回退名）。
+ *  resolveApiKey(provider) 用完整 ProviderConfig；多 key 场景用本函数传单 key
+ *  的三槽。逻辑同源（tryResolveCredentialKey），key 级不做 keyless 判定——那由
+ *  provider 级入口负责。 */
+export function resolveCredentialKey(cred: CredentialSlots): string {
+  const resolved = tryResolveCredentialKey(cred)
+  if (resolved !== undefined) return resolved
+  const defaultEnvVar = `${cred.name.toUpperCase()}_API_KEY`
+  throw new Error(
+    `No API key configured for "${cred.name}". ` +
+    `Set apiKey in config or the ${cred.apiKeyEnv ?? defaultEnvVar} environment variable.`
   )
 }
 
@@ -136,7 +175,14 @@ export function createProviderClient(
   }
 
   return new OpenAIClient({
-    baseUrl: provider.baseUrl,
+    // 用户在 Base URL 里粘贴 curl 全文（`…/v1/chat/completions`）或留个尾斜杠
+    // 是常态。发送路径拼的是 `${baseUrl}/chat/completions`，不归一化就会出现
+    // `…/chat/completions/chat/completions`（404）或 `…/v1//chat/completions`。
+    // 探测路径早就用 normalizeBaseUrl 挡了这一手（endpoint-map.ts），发送路径
+    // 漏了——症状于是固定为「连接测试通过、对话静默失败」。
+    // 仅 OpenAI 分支适用：AnthropicClient 自己补 `/v1/messages`，对它剥尾巴会
+    // 反造出 `/v1/v1/messages`——那是另一种错法，不在本处收口。
+    baseUrl: normalizeBaseUrl(provider.baseUrl),
     apiKey: params.apiKey,
     model: params.model,
     maxTokens: params.maxTokens,
@@ -185,9 +231,12 @@ function modelContextWindow(provider: ProviderConfig, modelId: string): number {
   // Fall back to the provider's first configured model rather than a fixed
   // small constant: schema requires contextWindow on every model, so the
   // 128K terminal fallback only applies to a provider with zero models.
+  // 多 key：走 keys 池派生（contractModels）——顶层 models 是迁移快照，key 级增删
+  // 不回写，直接读它可能取到已删除模型的窗口值或漏掉 key 里新加的模型。
+  const pool = contractModels(provider)
   return (
-    provider.models.find(model => model.id === modelId || model.alias === modelId)?.contextWindow
-    ?? provider.models[0]?.contextWindow
+    pool.find(model => model.id === modelId || model.alias === modelId)?.contextWindow
+    ?? pool[0]?.contextWindow
     ?? 128_000
   )
 }

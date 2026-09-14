@@ -55,7 +55,8 @@ import type { Sensorium } from './sensorium.js'
 import type { StrategyProfile } from './sensorium.js'
 import { createThetaState } from './star-event.js'
 import type { ThetaState } from './star-event.js'
-import { RuntimeHookPipeline, createRuntimeHookContext, type RuntimeHookSnapshot } from './runtime-hooks.js'
+import { RuntimeHookPipeline, createRuntimeHookContext, type RuntimeHookSnapshot, type RuntimeHookContext } from './runtime-hooks.js'
+import { DetachedRunner } from './post-session-detach.js'
 import { TurnPerceptionController } from './turn-perception.js'
 import { TurnIntentController } from './turn-intent.js'
 import { ContextInjectionController } from './context-injection.js'
@@ -141,6 +142,7 @@ import type { CompactBoundaryCoordinator } from "./compact-boundary-coordinator.
 import type { TurnOrchestrator } from "./turn-orchestrator.js";
 import { type EffortShadowRecord } from './p3-reward.js'
 import { TurnCacheObservability } from './cache-log-observability.js'
+import { ZenPhaseController, foldZenFromMeta, isZenFaceTool, resolveZenConfig, zenUnlockDefinition, zenUnregisteredHint, type ZenPhase, type ZenPromoteReason } from './zen-mode.js'
 
 export type { ApprovalMode, AgentConfig, AgentCallbacks }
 
@@ -230,6 +232,12 @@ export class AgentLoop {
   private _idleSettled: Promise<void> | null = null
   /** P0-1 persist drain: awaits pending async writes so tool results survive abort. */
   private _persistDrain: (() => Promise<void>) | null = null
+  /** 当前 run 的 callbacks（zen_phase 事件在构造期 arm 时可能还没有） */
+  private zenPhaseCallbacks: AgentCallbacks | null = null
+  /** Zen Mode 相位状态机。会话启动 arm（读面收窄）；面外工具/triage/超时晋升 full。 */
+  zenController: ZenPhaseController
+  /** 中止路径 postSession 的后台链（见 post-session-detach.ts）。 */
+  private readonly postSessionDetach = new DetachedRunner()
   private physarumForWarmup?: PhysarumEngine
   private meridianDbForWarmup?: import('../repo/meridian-db.js').MeridianDb
   private memoriesWarmed = false
@@ -538,7 +546,8 @@ export class AgentLoop {
   vigorState: VigorState = createVigorState()
   runtimeHooks: RuntimeHookPipeline
   /** P2 Wave 2: config HMR watcher（非 headless 模式装配）。persistent:false
-   *  不阻塞进程退出；AgentLoop 会话结束即随实例回收。 */
+   *  不阻塞进程退出；但不会随实例 GC 自动消失（FSWatcher 持有原生句柄），整个
+   *  AgentLoop 被丢弃时须经 stopConfigWatcher() 显式 close（switch 三路径）。 */
   configWatcher: ConfigWatcherHandle | null = null
   perception: TurnPerceptionController
   intent: TurnIntentController
@@ -722,6 +731,29 @@ export class AgentLoop {
     if (!this.config.permissionsOverlay) {
       this.config.permissionsOverlay = createPermissionOverlay()
     }
+    // Zen Mode 相位状态机：会话启动 arm（读面收窄）；面外工具/triage/timeout/
+    // /fast 晋升 full。isTopLevel=false（worker/委派）永不 arm——工具面由委派方
+    // 决定。applyFace 忽略入参：工具面实际由 gatedToolDefinitions 按 isZen 过滤。
+    // 二次物化：config.zen 若已是物化形态则幂等；直构传未物化形态（如
+    // {enabled:true} 缺 face）在此补齐默认读面，防 face 集合为空把工具面收窄殆尽。
+    this.zenController = new ZenPhaseController(
+      resolveZenConfig(config.zen),
+      {
+        isTopLevel: !(config.headless ?? false) && (config.delegationDepth ?? 0) === 0,
+        registeredNames: () => this.config.toolRegistry.getDefinitions().map(d => d.name),
+        applyFace: () => { this.updateTools() },
+        onPhaseChange: (phase, reason) => {
+          this.persistZenPhase(phase, reason)
+          // appendixLean 配置消费端（Wave 3 接线）：false = 禅相位保留全量动态注入
+          // （只收窄工具面）。Cache-safe：只影响 dynamic appendix。
+          // 取物化配置（resolvedConfig）而非未物化的 config.zen——后者要内联
+          // `?? true` 复述默认值，与 defaultZenConfig 构成第二真相源。
+          const lean = phase === 'zen' && this.zenController.resolvedConfig.appendixLean
+          this.config.promptEngine.setZenLean(lean)
+          this.emitZenPhaseEvent(phase, reason)
+        },
+      },
+    )
     this.cwd = cwd ?? process.cwd()
     // 构造期注入共享 prewarm——必须早于 createToolExecutionController（下方
     // L929 附近）：其 deps 按值捕获 self.prewarm，构造后替换字段到不了消费端。
@@ -1038,6 +1070,9 @@ export class AgentLoop {
       const listener = attachSessionPersistListener({ session: this.session, persist: this.persist })
       this._persistDrain = listener.drain
     }
+    // Zen Mode：会话启动 arm（首轮请求前收窄工具面到读面；resume 按 meta 恢复相位）。
+    // 必须晚于 persist 初始化——arm 的 resume 判定要读 meta。
+    this.armZenIfNeeded()
   }
 
   createTurnStreamController(): TurnStreamController {
@@ -1463,25 +1498,134 @@ export class AgentLoop {
     // config 的测试路径）才回退 live 解析。
     const toolDescriptions = (this.config.blockPolicy
       ?? resolvePromptBlocks(this.config.cwd ?? process.cwd())).toolDescriptions
-    if (!gating) return applyDescriptionMode(all, toolDescriptions)
-    return gateToolDefinitions(all, {
-      enabled: gating.enabled,
-      coreOverride: gating.coreOverride,
-      extraCore: gating.extraCore,
-      domainTier: gating.domainTier,
-      mountedExtras: [...this.mountedExtras],
-      disabledTools: gating.disabledTools,
-      toolDescriptions,
-    })
+    // 门控先行：disabledTools / domainTier 等策略边界在任何相位（含 zen）都
+    // 不得绕过——zen 只做「读面 ∩ 门控存活集」的二次收窄，而非替代门控
+    // （历史缺陷：zen 分支提前 return 跳过 gateToolDefinitions，策略禁用的
+    // 工具在禅相位仍对模型暴露）。原 `if (!gating)` 早退路径同样经此合并。
+    // 注：gateToolDefinitions 内部三处返回均已 applyDescriptionMode，故下方
+    // 只对**新增**的 zen_unlock 定义再应用一次，避免对已处理定义双重压缩
+    // （压缩非严格幂等时即为字节级回归）。
+    const gated = gating
+      ? gateToolDefinitions(all, {
+          enabled: gating.enabled,
+          coreOverride: gating.coreOverride,
+          extraCore: gating.extraCore,
+          domainTier: gating.domainTier,
+          mountedExtras: [...this.mountedExtras],
+          disabledTools: gating.disabledTools,
+          toolDescriptions,
+        })
+      : applyDescriptionMode(all, toolDescriptions)
+    // Zen 相位：工具面收窄到读面 ∩ 已门控集；晋升 full 后回落到门控全集，
+    // 二者是叠加关系。
+    if (this.zenController.isZen) {
+      const face = this.zenController.face
+      // 解锁声明工具恒注入：物理收窄切断模型调用面外工具的通道，zen_unlock
+      // 是可见的动手意图入口（虚拟——不在 registry，执行由 ToolExecutionController 拦截）。
+      return [...gated.filter(d => face.has(d.name)), ...applyDescriptionMode([zenUnlockDefinition()], toolDescriptions)]
+    }
+    return gated
   }
 
   updateTools(): void {
     this.config.promptEngine.updateTools(this.gatedToolDefinitions())
   }
 
-  /** 当前主控实际可见的工具名（已应用门控 + 运行时挂载）。 */
+  /** 当前主控实际可见的工具名（已应用门控 + 运行时挂载 + zen 读面）。 */
   getActiveToolNames(): string[] {
     return this.gatedToolDefinitions().map(d => d.name)
+  }
+
+  // ── Zen Mode 相位控制 ────────────────────────────────
+
+  /** 会话启动 arm：zen 启用 + 未 resume 到 full → 收窄工具面到读面。 */
+  private armZenIfNeeded(): void {
+    if (!this.config.zen?.enabled) return
+    // resume：meta 记录上次相位 full → 保持全量（不重入 zen）；zen/无记录 → arm。
+    if (this.persist) {
+      try {
+        const resumed = foldZenFromMeta(this.persist.loadMetadata())
+        if (resumed?.phase === 'full') return
+        // resume 到 zen：恢复已消耗的 turn 预算——已到预算时 arm 内部立即
+        // promote(timeout)，防止反复 resume 把超时晋升无限续期。
+        if (resumed) {
+          this.zenController.arm(resumed.zenTurns)
+          return
+        }
+      } catch { /* 读 meta 失败按无记录处理 */ }
+    }
+    this.zenController.arm()  // 内部 applyFace（updateTools 收窄读面）+ onPhaseChange（meta 镜像）
+  }
+
+  /** 晋升 full：相位翻转 + 相位镜像写盘 + 工具面恢复全量（门控/描述档位照旧）。 */
+  promoteZen(reason: ZenPromoteReason): boolean {
+    return this.zenController.promote(reason)
+  }
+
+  /**
+   * Zen 解锁点（tool-execution 分派前经 onZenEscape 调用）：zen 相位下面外工具
+   * → 晋升 full + 放行（controller 内部判定面外并 promote；promote 是同步翻转，
+   * 不阻断本批工具执行）。面内工具/未注册工具/zen 禁用时恒放行不晋升。
+   */
+  onZenEscape(toolName: string): void {
+    this.zenController.onToolRequest(toolName)
+  }
+
+  /**
+   * 禅相位下未注册工具报错的行动指引：仅当 zen 且该工具确实未注册时返回提示
+   * （幻觉调用不晋升，但给模型指向 zen_unlock 的出路，而不是裸 Unknown tool）。
+   */
+  getZenUnregisteredHint(toolName: string): string | undefined {
+    if (!this.zenController.isZen) return undefined
+    const verdict = isZenFaceTool(
+      toolName,
+      [...this.zenController.face],
+      new Set(this.config.toolRegistry.getDefinitions().map(d => d.name)),
+    )
+    return verdict === 'unregistered' ? zenUnregisteredHint(toolName) : undefined
+  }
+
+  /** Zen 相位 turn 边界：首消息分诊（单行短消息跳过禅）+ 步数预算计数（tick）。 */
+  private zenTurnBoundary(userInput: string, hasAttachments: boolean): void {
+    if (!this.zenController.isZen) return
+    this.zenController.maybeTriage(userInput, hasAttachments)
+    this.zenController.tick()
+    // 步数计数落盘：zenStats 若只在相位翻转（onPhaseChange）时写，zen 中途退出
+    // 后 meta 恒为 arm 时的 zenTurns=0，resume 会把预算清零——「反复 resume 无限
+    // 续期」漏洞的写侧另一半。tick 晋升时 onPhaseChange 已写 full，此处只在仍处
+    // zen 时镜像，避免双写。
+    if (this.zenController.isZen) this.persistZenPhase('zen')
+  }
+
+  /** 相位镜像 → 会话事件流（zen 启用时；worker/禁用不 emit）。
+   *  best-effort：与 persistZenPhase 同款——回调链（桌面端 SSE 写入等）失败
+   *  不得掀翻主流程。此处曾无保护，且 run() 的补发发生在 try 之外：回调抛一次
+   *  就让 run() reject 而 _running 恒 true，后续输入全部 skipped-already-running
+   *  （会话假死，只能重启进程）。 */
+  private emitZenPhaseEvent(phase: ZenPhase, reason?: ZenPromoteReason): void {
+    if (!this.config.zen?.enabled) return
+    try {
+      const snap = this.zenController.snapshot()
+      this.zenPhaseCallbacks?.onZenPhaseChange?.(phase, reason, {
+        armed: snap.zenStats.armed,
+        zenTurns: snap.zenStats.zenTurns,
+      })
+    } catch (err) {
+      debugLog(`[zen] 相位镜像回调失败（相位与工具面不受影响）：${(err as Error)?.message ?? String(err)}`)
+    }
+  }
+
+  /** 相位镜像写盘（best-effort——写失败不影响工具面切换；resume 据此恢复）。 */
+  private persistZenPhase(phase: ZenPhase, reason?: ZenPromoteReason): void {
+    if (!this.persist) return
+    try {
+      const snap = this.zenController.snapshot()
+      this.persist.updateMetadata({
+        zenPhase: phase,
+        ...(reason !== undefined ? { zenPromoteReason: reason } : {}),
+        zenStats: snap.zenStats,
+      } as Partial<import('../context/types.js').SessionMetadata>)
+    } catch { /* best-effort */ }
   }
 
   /**
@@ -2224,10 +2368,33 @@ export class AgentLoop {
   }
 
   async runPostSession(callbacks: AgentCallbacks): Promise<void> {
+    await this.runPostSessionWith(this.buildPostSessionContext(callbacks))
+  }
+
+  /**
+   * 中止路径专用：快照**同步**取（下一轮 initializeRun 会重置 evidence /
+   * trajectory / sensorium），hooks 与落盘进后台串行链。run() 不等它——
+   * 对齐 Codex（hooks 异步，下一轮 drain）。natural-finish 仍走 runPostSession。
+   */
+  schedulePostSessionDetached(callbacks: AgentCallbacks): void {
+    const ctx = this.buildPostSessionContext(callbacks)
+    this.postSessionDetach.schedule(() => this.runPostSessionWith(ctx))
+  }
+
+  /** 关停收口：等后台 postSession 链跑完（有界）。 */
+  drainPostSession(timeoutMs = 5_000): Promise<boolean> {
+    return this.postSessionDetach.drain(timeoutMs)
+  }
+
+  private buildPostSessionContext(callbacks: AgentCallbacks): RuntimeHookContext {
+    return createRuntimeHookContext(this.buildRuntimeSnapshot(),
+      { emitPhaseChange: (phase, detail) => { callbacks.onPhaseChange?.(phase, detail) } })
+  }
+
+  private async runPostSessionWith(ctx: RuntimeHookContext): Promise<void> {
     // P0-1: drain pending async persist writes so tool results survive abort/Ctrl+C.
     await this._persistDrain?.()
-    await this.runtimeHooks.runPostSession(createRuntimeHookContext(this.buildRuntimeSnapshot(),
-      { emitPhaseChange: (phase, detail) => { callbacks.onPhaseChange?.(phase, detail) } }))
+    await this.runtimeHooks.runPostSession(ctx)
     if (this.config.sessionRegistry) {
       try { this.config.sessionRegistry.cleanupOldEvents(2 * 60 * 60 * 1000) } catch { /* ignore */ }
     }
@@ -2333,6 +2500,13 @@ export class AgentLoop {
     this.latestFsWatcherState = { eventRate: 0, eventCount: 0, active: false }
   }
 
+  /** 释放 config 热载 watcher（仅丢弃整个 AgentLoop 时调用；不可并入每轮
+   *  run() 的 stopFsWatcher——那会把热载在首条用户消息后关死）。 */
+  stopConfigWatcher(): void {
+    try { this.configWatcher?.close() } catch { /* best-effort */ }
+    this.configWatcher = null
+  }
+
   isRunning(): boolean {
     return this._running
   }
@@ -2353,6 +2527,10 @@ export class AgentLoop {
       return 'skipped-already-running'
     }
     this._running = true
+    this.zenPhaseCallbacks = callbacks
+    // 构造期 arm 早于首个 run（无 callbacks），这里补发当前相位镜像，
+    // 桌面端 reconnect/首轮也能拿到 zen/full 徽章状态。
+    this.emitZenPhaseEvent(this.zenController.currentPhase, this.zenController.lastPromoteReason ?? undefined)
     // Eager abort controller: created synchronously before any await (incl. the
     // cancelIdleCompaction() drain below) so an Esc/Ctrl+C during the init/warmup
     // window aborts a live signal instead of a no-op. Pending latch is cleared
@@ -2371,6 +2549,10 @@ export class AgentLoop {
     // session is always in a consistent state at the await boundary.
     try {
       await this.cancelIdleCompaction()
+
+      // Zen 相位 turn 边界：首消息分诊（单行短消息跳过禅）+ 步数预算计数。
+      // 用原始 userInput（图片桥接改写前的文本）——短消息判定应贴近用户原意。
+      this.zenTurnBoundary(userInput, (images?.length ?? 0) > 0)
 
       // 视觉副驾：先把本轮图片寄存进 registry（无论主控是否多模态），供 ask_image
       // 反复追问。id 顺序与 images 顺序一致。纯内存、不进 prompt/落盘。

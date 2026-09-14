@@ -86,6 +86,22 @@ function preserveArtifactRef(content: string, result: CollapsedResult): Collapse
 }
 
 export function collapseGrepResult(toolName: string, content: string, originalTokens: number): CollapsedResult {
+  // 已带 artifact 的结果：正文是工具层的 head/tail 截断副本——此处对残缺正文
+  // 重算行数会把 head 的少数行包装成完整读数（台账 F4：实测 65/20 被抹成
+  // 8/4，且 `[artifact:…]` 行本身还会被数成一个「文件」）。工具层已给出全量
+  // 统计（summarizeGrepResult 的 `grep "…": N matches in M files`）——沿用之；
+  // 解析不到则只留回读提示。格式耦合：同仓同版可接受，失配自动落 fallback。
+  if (/\[artifact:[^\]]+\]/.test(content)) {
+    const fullStatLine = content
+      .split('\n')
+      .map(l => l.trim())
+      .find(l => /^(grep|search) ".*": \d+ matches in \d+ files/.test(l))
+    const summary = fullStatLine
+      ? `[collapsed ${toolName}: ${fullStatLine.slice(0, 240)}]`
+      : `[collapsed ${toolName}: 正文已截断，完整匹配列表见 artifact]`
+    return { toolName, summary, originalTokens, collapsedTokens: Math.ceil(summary.length / CHARS_PER_TOKEN) }
+  }
+
   const lines = content.split('\n').filter(l => l.trim())
   const fileSet = new Set<string>()
   let matchCount = 0

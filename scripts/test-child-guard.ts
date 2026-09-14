@@ -44,6 +44,13 @@ export interface GuardedResult {
   summarySeen: boolean
   /** 收尾方式：null = 子进程自己退出；'idle' / 'hard' = 看门狗动手。 */
   killed: 'idle' | 'hard' | null
+  /** 已见的用例行计数（✔/✖ 行）。无汇总时它是「至少跑了多少」的下界——
+   *  跨批合计据此报告进度，而不是把整批已跑的测试记成 0。 */
+  seenChecks: { pass: number; fail: number }
+  /** 流末尾若干行（无汇总时用于定位卡在哪个测试上）。 */
+  tailExcerpt: string
+  /** 有失败时的更长末帧（覆盖 node 的 `failing tests:` 明细段）——runner 汇总后重放用。 */
+  failureExcerpt: string
 }
 
 export interface GuardOptions {
@@ -61,6 +68,13 @@ export interface GuardOptions {
 const SUMMARY_LINE_RE = /^ℹ (tests|pass|fail) (\d+)\s*$/gm
 /** 汇总在流末尾；只留尾部即可覆盖，同时防止长跑批次把 buffer 撑爆。 */
 const TAIL_KEEP = 64 * 1024
+/** 用例结果行（spec reporter 形如 `✔ name (1ms)` / `  ✔ nested` / `✖ name`）。 */
+const CHECK_LINE_RE = /^[ \t]*(✔|✖) /gm
+/** 无汇总时回传的末帧行数——够看出卡在哪个测试上。 */
+const TAIL_EXCERPT_LINES = 6
+/** fail > 0 时回传的失败末帧行数——node 的 `failing tests:` 明细段比 6 行长，
+ *  专供 runner 在合计行后重放（台账 F5：失败定位不必重跑）。 */
+const FAILURE_EXCERPT_LINES = 40
 
 export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
   const idleMs = opts.idleMs ?? DEFAULT_IDLE_MS
@@ -74,6 +88,9 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
       fail: null,
       summarySeen: false,
       killed: null,
+      seenChecks: { pass: 0, fail: 0 },
+      tailExcerpt: '',
+      failureExcerpt: '',
     }
 
     const child = spawn(process.execPath, opts.args, {
@@ -109,6 +126,13 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
         // 没有汇总 = 没有验证。子进程若非零退出则沿用，否则兜到 1（fail-closed）。
         result.code = exitCode !== null && exitCode !== 0 ? exitCode : 1
       }
+      // 无汇总时把「已跑到哪」一并回传：调用方据此报告进度并定位挂死点，
+      // 不必把整批已跑的测试记成 0。
+      const tailLines = tail.split('\n').filter(l => l.trim() !== '')
+      result.tailExcerpt = tailLines.slice(-TAIL_EXCERPT_LINES).join('\n')
+      // 有失败时再留一段更长的末帧（含 `failing tests:` 明细）——runner 汇总后重放，
+      // 让「只 tail 看输出尾部」的用法也能直接定位失败（台账 F5）。
+      result.failureExcerpt = (result.fail ?? 0) > 0 ? tailLines.slice(-FAILURE_EXCERPT_LINES).join('\n') : ''
       resolve(result)
     }
 
@@ -122,6 +146,11 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
 
     const consume = (chunk: Buffer): void => {
       const text = chunk.toString()
+      // 只统计**新到达的 chunk**——tail 是累积缓冲，用它计数会把同一行重复计入
+      for (const m of text.matchAll(CHECK_LINE_RE)) {
+        if (m[1] === '✔') result.seenChecks.pass++
+        else result.seenChecks.fail++
+      }
       tail = (tail + text).slice(-TAIL_KEEP)
       for (const m of tail.matchAll(SUMMARY_LINE_RE)) {
         const key = m[1]

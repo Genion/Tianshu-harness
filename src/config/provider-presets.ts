@@ -33,12 +33,11 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
   deepseek: {
     key: 'deepseek',
     label: 'DeepSeek',
-    description: '官方旗舰：1M 上下文 + 深度推理，适合重活主控',
-    // 2026-09-11：V4-Pro 退役（官方 14 日下线，且能力已弱于 V4.1-Flash 线）——条目已移除，
-    // 存量用户快照由 manager.ts 的 migrateDeepseekV4ProRetirement 清理（preset 改动单靠
-    // deepMerge 到不了存量配置）。默认档为 v4-flash；强档落点改由 deepseek-flash
-    // （V4.1 线）承接，见下方 models。
-    // 与新装首模型（models[0]，无 agent.defaultModel 时的启动兜底）保持一致。
+    description: '官方 DeepSeek：1M 上下文，多档可选——默认快速档，深度推理可切旗舰档',
+    // 2026-09-13：官方改口径——v4-pro 不再下架、继续提供服务（用户转达官方声明）。
+    // ea8d9c92c 的退役据此撤销：条目恢复，deepseek-flash 保持 strong（多模态/视觉
+    // 是真能力，两个 strong 档并存合理——路由按 tier 取池，成本差由席位自己的预算约束）。
+    // defaultModelId 维持 deepseek-v4-flash 不变（默认档走低价）。
     defaultModelId: 'deepseek-v4-flash',
     keyUrl: 'https://platform.deepseek.com/api_keys',
     provider: {
@@ -70,10 +69,23 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
           pricing: { input: 1, output: 2, cacheRead: 0.02, cacheWrite: 1 },
         },
         {
+          // 官方 2026-09-13 改口径：继续提供服务，不下线。恢复 ea8d9c92c 前的条目形态
+          // （顺序也复原——v4-flash 保持首位，defaultModelId 的「默认档排首位」不变量不破）。
+          id: 'deepseek-v4-pro',
+          description: '旗舰推理档，1M 上下文',
+          alias: 'v4-pro',
+          contextWindow: 1_000_000,
+          maxTokens: 384_000,
+          // Cost default: high (not max). Routine turns can step down further via
+          // effort routing; users who need max can set it in config / Settings.
+          reasoningEffort: 'high',
+          tier: 'strong',
+          pricing: { input: 3, output: 6, cacheRead: 0.025, cacheWrite: 3 },
+        },
+        {
           // 2026-09-10 接入（V4.1 Flash 线，用户指定 id）：1M 上下文 + 原生多模态，
           // 定价与 v4-flash 同档。图片按尺寸换算 token 计入计费。
-          // 2026-09-11 起承接 strong 档：V4-Pro 退役后本卡是 DeepSeek 唯一的强档卡，
-          // 议事会瑶光门席位（天府 / 三柱护栏席）与 planning 路由都落在它上面。
+          // 2026-09-11 起承接 strong 档；v4-pro 恢复后两个 strong 档并存（见上）。
           // 名字里的 "flash" 只标定价档位、不代表能力——路由读的是 tier 字段，
           // 勿据模型名把它降档。
           id: 'deepseek-flash',

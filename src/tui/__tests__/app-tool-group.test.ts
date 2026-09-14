@@ -214,3 +214,33 @@ test('flush 后 scrollback 中折叠组渲染正确，含 ctrl+o 提示', () => 
   assert.ok(text.includes('b.ts'), 'b.ts in collapsed group')
 })
 
+
+
+// ── zen_unlock：虚拟工具的结果不落 scrollback（改走 glance bar 限时提示） ──
+// 用户报告「禅解除提示一直挂在推理区下面」：该虚拟工具没有第二次回调，普通结果
+// 渲染路径会把它累积进 live 工具卡并永远等不到终态。
+
+test('zen_unlock 结果不落 scrollback（相位状态由徽章表达，通知走限时提示）', () => {
+  const { app } = makeApp()
+  app.callbacks.onToolResult('u1', 'zen_unlock', '禅模式已解除：全量工具面已恢复，可调用任意工具。', false)
+
+  assert.ok(
+    !scrollbackPlain(app).includes('禅模式已解除'),
+    'zen_unlock 的结果不得进 scrollback（此前会永久悬停在 live 区）',
+  )
+})
+
+test('对照：普通工具的 terminal 结果照常落 scrollback（防上面的断言空对空）', () => {
+  const { app } = makeApp()
+  // 与 #1 同款：先 onToolUse 注册，再由异族工具到达触发组 flush
+  app.callbacks.onToolUse('t1', 'read_file', { file_path: 'zen-notice-control.ts' })
+  tr(app, 't1', 'read_file', 'file content here')
+  app.callbacks.onToolUse('w1', 'write_file', { file_path: 'out.ts' })
+  tr(app, 'w1', 'write_file', 'ok')
+
+  const plain = scrollbackPlain(app)
+  assert.ok(
+    plain.includes('zen-notice-control.ts'),
+    `普通工具结果必须进 scrollback，否则对照失效。实际前 200 字：${plain.slice(0, 200)}`,
+  )
+})

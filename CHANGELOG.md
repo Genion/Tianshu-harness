@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-13 — 对话发送路径补 Base URL 归一化
+
+### Fixed
+
+- **Base URL 填成完整请求地址时对话静默 404** — 用户在 provider 的 Base URL 里粘贴 curl 全文（如 `https://open.bigmodel.cn/api/paas/v4/chat/completions`）或留个尾斜杠时，连通性探测经 `normalizeBaseUrl()` 剥掉路径尾巴返回 200，而对话发送路径把原始 baseUrl 与 `/chat/completions` 直接拼接，实际请求变成 `…/chat/completions/chat/completions` → 404。症状固定为「连接测试通过、对话没反应」。现在 `createProviderClient` 的 OpenAI 分支在构造 client 前统一归一化（该函数是主 agent 与全部 worker 的唯一构造入口），欢迎语路径同源问题一并修正——此前它的失败被 catch 咽下、静默降级成模板池。Anthropic 分支有意不归一化：`AnthropicClient` 自补 `/v1/messages`，剥尾巴会反造出 `/v1/v1/messages`。回归测试 `src/api/__tests__/base-url-normalization.test.ts` 锁住「出站 URL 恰以一个 `/chat/completions` 结尾」这一不变量。
+
 ## 2026-08-13 — 交付门禁：共同归属文件可随整体验证一起提交
 
 ### Changed

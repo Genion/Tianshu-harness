@@ -9,6 +9,8 @@
  *   DELETE /config/providers/:name/models/:modelId  remove a model from a provider
  *   POST   /config/providers/:name/key      set API key (inline or env)
  *   DELETE /config/providers/:name/key      clear the stored key, keep the provider (default provider allowed)
+ *   Multi-key (PR-3): POST/DELETE /config/providers/:name/keys[/:keyId] and
+ *   PUT /config/providers/:name/keys/:keyId/{key,label,models} — see config-routes-keys.ts
  *   POST   /config/providers/test-key       probe a key against a provider's /models (setup-time validation; apiKey optional → falls back to the provider's stored key; ok responses carry the fetched model id list)
  *   POST   /config/providers/:name/default  set as default provider
  *   GET    /config/balance                  query DeepSeek account balance (official API)
@@ -94,8 +96,64 @@ import { allPresetKeys, resolvePreset, resolvePresetBaseUrl, resolvePresetLabel 
 import { modelConfigSchema, type ModelConfig } from '../config/schema.js'
 import { queryDeepSeekBalance, type BalanceResult } from '../api/balance-client.js'
 import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
-import { probeProviderKey } from '../api/key-probe.js'
+import { generateImage } from '../api/image-gen-client.js'
+import {
+  getImageGenModelConfig,
+  registerImageGenModelConfig,
+  setImageGenModelConfig,
+  type SetImageGenModelConfigInput,
+} from '../config/image-gen-model.js'
 import { probeProvider } from '../api/provider-probe.js'
+
+/** 生图真测用的固定提示词——要足够简单，任何生图模型都能画出来。 */
+const IMAGE_GEN_TEST_PROMPT = 'a red circle on a white background'
+
+interface ParsedImageGenRequest {
+  baseUrl: string
+  modelId: string
+  providerName?: string
+  /** 用于真测请求的实际 key（apiKey 或由 apiKeyEnv 解析而来）。 */
+  apiKey?: string
+  /** 原样透传给 registerImageGenModelConfig 的凭据字段。 */
+  rawApiKey?: string
+  rawApiKeyEnv?: string
+  sizeField?: 'size' | 'image_size'
+  error?: string
+}
+
+/**
+ * 生图 provider 的凭据/参数解析。apiKey 与 apiKeyEnv 互斥；真测需要**实际**的
+ * key，因此 apiKeyEnv 会在此刻从 process.env 解析（配置里只持久化变量名）。
+ */
+function parseImageGenRequest(body: unknown, options: { requireProviderName?: boolean } = {}): ParsedImageGenRequest {
+  const record = (body ?? {}) as Record<string, unknown>
+  const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim() : ''
+  const modelId = typeof record.modelId === 'string' ? record.modelId.trim() : ''
+  const providerName = typeof record.providerName === 'string' ? record.providerName.trim() : undefined
+  const apiKey = typeof record.apiKey === 'string' ? record.apiKey.trim() : undefined
+  const apiKeyEnv = typeof record.apiKeyEnv === 'string' ? record.apiKeyEnv.trim() : undefined
+  const sizeField = record.sizeField === 'size' || record.sizeField === 'image_size' ? record.sizeField : undefined
+
+  if (!baseUrl) return { baseUrl: '', modelId, error: 'baseUrl is required' }
+  if (!modelId) return { baseUrl, modelId: '', error: 'modelId is required' }
+  if (options.requireProviderName && !providerName) return { baseUrl, modelId, error: 'providerName is required' }
+  if (apiKey && apiKeyEnv) return { baseUrl, modelId, error: 'Use either apiKey or apiKeyEnv, not both.' }
+
+  const resolvedKey = apiKey ?? (apiKeyEnv ? process.env[apiKeyEnv] : undefined)
+  return {
+    baseUrl,
+    modelId,
+    ...(providerName ? { providerName } : {}),
+    ...(resolvedKey ? { apiKey: resolvedKey } : {}),
+    ...(apiKey ? { rawApiKey: apiKey } : {}),
+    ...(apiKeyEnv ? { rawApiKeyEnv: apiKeyEnv } : {}),
+    ...(sizeField ? { sizeField } : {}),
+  }
+}
+import { probeForTestKey, matchModelDefaults } from './provider-probe-adapter.js'
+import { buildProviderKeyRoutes } from './config-routes-keys.js'
+import { listProviderKeys, type ProviderKeyListItem } from '../config/provider-key-store.js'
+import { contractModels } from '../config/contract-models.js'
 import { resolveApiKey } from '../api/factory.js'
 import { getDeepSeekUserSummary, getDeepSeekCostReport } from '../api/deepseek-platform-client.js'
 import { listGrantedApps, revokeApp } from '../tools/computer-use/app-grants.js'
@@ -116,12 +174,16 @@ function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
  *  解析链（2026-09-09 审查 P2 收口：两端点曾逐字重复，独立演化会静默分叉——
  *  将来任一端点加能力改这里即可）。优先级：显式 body 覆盖 → 存量 provider
  *  配置（resolveApiKey 物化 keyRef/apiKeyEnv）→ preset baseUrl（preset 带
- *  每 provider 正确端点，如 zhipu-vision 用 PaaS 而非 coding 端点）。 */
+ *  每 provider 正确端点，如 zhipu-vision 用 PaaS 而非 coding 端点）。
+ *  allowKeyless：test-key 探测的无鉴权端点（Ollama/vLLM）缺 key 不拦截，探测
+ *  结果定成败。2026-09-10 收口——keyless 曾以路由内联解析实现，恰是本函数
+ *  注释警告过的两端点静默分叉。 */
 function resolveProviderProbeTarget(
   provider: string,
   apiKey: string | undefined,
   baseUrlOverride: string | undefined,
-): { apiKey: string; baseUrl: string } | { error: string } {
+  opts?: { allowKeyless?: boolean },
+): { apiKey: string | undefined; baseUrl: string } | { error: string } {
   // apiKey 可选：缺省时用该 provider 的存储 Key（keyRef 物化 / apiKeyEnv）——
   // 已配置 provider 上的「拉取模型列表/测试调用」不应要求用户重输 Key。
   let resolvedKey = apiKey
@@ -131,7 +193,7 @@ function resolveProviderProbeTarget(
       try { resolvedKey = resolveApiKey(stored) } catch { resolvedKey = undefined }
     }
   }
-  if (!resolvedKey) return { error: 'apiKey is required (or set a key on the provider first)' }
+  if (!resolvedKey && !opts?.allowKeyless) return { error: 'apiKey is required (or set a key on the provider first)' }
   let baseUrl = baseUrlOverride
   if (!baseUrl) {
     const cfg = loadConfig()
@@ -179,13 +241,18 @@ export interface ProviderListItem {
   name: string
   label: string
   baseUrl: string
+  protocol: 'openai' | 'anthropic'
   isDefault: boolean
   keyStatus: { source: 'inline' | 'env' | 'none'; ref: string }
   /** 无需 API key 的端点：keyless 预设（ollama），或未配任何密钥材料的自定义
    *  provider（桌面表单 API Key 可选，用户有意空着 = keyless 端点）。
    *  模型选择器据此区分「keyless」与「该配 key 而没配」——前者照常列出。 */
   keyless: boolean
-  models: { id: string; alias?: string; supportsVision?: boolean }[]
+  models: { id: string; alias?: string; supportsVision?: boolean; supportsImageGen?: boolean }[]
+  /** 多 key 池（PR-3）：每个 key 的自身凭据状态与模型归属。顶层 models /
+   *  keyStatus 保留为兼容视图（与默认 key 一致）；UI 改为消费本数组。
+   *  未迁移且无凭证无模型的 provider 为空数组。 */
+  keys: ProviderKeyListItem[]
   isPreset: boolean
   allowProFallback: boolean
   /** 三态：undefined = 按名称/baseUrl 启发式；true/false 压过启发式。 */
@@ -198,6 +265,11 @@ export interface ProviderListItem {
 
 export interface ConfigRouteHooks {
   onApprovalConfigChanged?: (approval: string) => void
+  /** 生图槽配置落盘后的实时生效信号（issue #8）：`generate_image` 的 isEnabled 随槽
+   *  配置从 false 翻 true，而工具定义是 agent 构建时快照给 promptEngine 的——不广播的话
+   *  当前会话永远看不到这个工具，用户表现为「配置成功但工具不出现」。与
+   *  onApprovalConfigChanged 同属「落盘后对存活 agent 广播」的模式。 */
+  onImageGenConfigChanged?: () => void
   /** provider/模型/密钥写盘成功后的快照刷新通知（serve 侧据此原地重建启动快照，
    *  「替换 key」「inline 压 env」对新解析即刻生效）。实现必须 fail-open。 */
   onProviderConfigChanged?: () => void
@@ -224,12 +296,15 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           name,
           label: resolvePresetLabel(name) ?? name,
           baseUrl: p.baseUrl,
+          protocol: p.protocol,
           isDefault: name === defaultName,
           keyStatus: getApiKeyStatus(name),
           // keyless 判定走 provider-presets 单一事实源（预设 keyless 或自定义无密钥材料）——
           // keyStatus 恒 none 的 keyless 端点靠本标记与「该配没配」区分。
           keyless: isKeylessProviderEntry(name, p),
-          models: p.models.map(m => ({ id: m.id, alias: m.alias, description: m.description, contextWindow: m.contextWindow, maxTokens: m.maxTokens, supportsVision: m.supportsVision })),
+          // 无 keys 才回退顶层快照——见 contractModels 的注释。
+          models: contractModels(p).map(m => ({ id: m.id, alias: m.alias, description: m.description, contextWindow: m.contextWindow, maxTokens: m.maxTokens, supportsVision: m.supportsVision, supportsImageGen: m.supportsImageGen })),
+          keys: listProviderKeys(name, p),
           isPreset: preset !== undefined,
           // 预设模型全集——UI 标注「预设含 N 个模型」（配置快照经
           // migratePresetModelBackfill 已对齐预设，此清单用于来源标注）。
@@ -462,22 +537,37 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       }
     }, apiToken),
 
-    // Probe a key against a provider's /models before saving it. Avoids writing
-    // an invalid key that only surfaces as a 401 when the user later sends a msg.
-    // Body: { provider: string, apiKey: string }. Provider resolved to baseUrl
-    // from preset (zhipu-vision uses PaaS endpoint, not coding) or stored config.
+    // Probe a provider's /models before saving it — unified with the CLI probe
+    // core (probeProvider) via the adapter. keyless: no key still probes — local
+    // endpoints (Ollama/vLLM) need no auth, the endpoint decides the outcome.
     'POST /config/providers/test-key': withAuth(async (body) => {
-      const { provider, apiKey, baseUrl: override, protocol } = body as {
-        provider?: string
-        apiKey?: string
-        baseUrl?: string
-        protocol?: 'openai' | 'anthropic'
-      }
+      const { provider, apiKey, baseUrl: override, protocol } = body as { provider?: string; apiKey?: string; baseUrl?: string; protocol?: 'openai' | 'anthropic' }
       if (!provider) return { status: 400, body: { error: 'provider is required' } }
-      const target = resolveProviderProbeTarget(provider, apiKey, override)
+      if (protocol !== undefined && protocol !== 'openai' && protocol !== 'anthropic') {
+        return { status: 400, body: { error: `Invalid protocol: ${String(protocol)} (expected 'openai' or 'anthropic')` } }
+      }
+      // key/baseUrl 走与 /config/providers/test 同源的共享解析链（防两端点漂移）；
+      // allowKeyless：无鉴权端点（Ollama/vLLM）缺 key 不拦截，探测结果定成败。
+      const target = resolveProviderProbeTarget(provider, apiKey, override, { allowKeyless: true })
       if ('error' in target) return { status: 400, body: { error: target.error } }
-      const result = await probeProviderKey(target.apiKey, target.baseUrl, protocol ?? 'openai')
+      const result = await probeForTestKey({ baseUrl: target.baseUrl, apiKey: target.apiKey, protocol, providerName: provider })
       return { status: 200, body: result }
+    }, apiToken),
+
+    // 手动粘贴模型 ID 的纯本地匹配（零网络）：按全局别名表回填 ctx/max/vision，
+    // 与 test-key 探测的 descriptors 同源同形——未拉取模型列表时也能拿到预设值，
+    // 别名表没有的模型才落界面兜底。inferredIds 为 fuzzy 推断命中的 rawId，
+    // 前端据此提示「这些值是推断的」（提醒而非拦截，落库语义与精确命中一致）。
+    'POST /config/providers/match-models': withAuth(async (body) => {
+      const { ids } = body as { ids?: unknown }
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return { status: 400, body: { error: 'ids must be a non-empty array of strings' } }
+      }
+      if (ids.some((id) => typeof id !== 'string' || !id.trim())) {
+        return { status: 400, body: { error: 'ids must contain only non-blank strings' } }
+      }
+      const { descriptors, inferredIds } = matchModelDefaults(ids as string[])
+      return { status: 200, body: { ok: true, descriptors, inferredIds } }
     }, apiToken),
 
     // Completion 级「测试模型调用」真测（2026-09-09 用户需求）：与 test-key 的
@@ -1060,6 +1150,85 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       return { status: 200, body: { ok: true, enabled: setVisionAutoBridge(enabled) } }
     }, apiToken),
 
+    // ── 生图模型（issue #8）：独立槽 + 专用 provider ──────────────────────
+    // 与识图链路同构的注册范式：专用 provider 只经本槽消费，provider.default 与
+    // agent.defaultModel 全程不动。真测会**真实出图**并消耗一次生成额度。
+    'GET /config/image-gen-model': withAuth(() => {
+      return { status: 200, body: { config: getImageGenModelConfig() ?? null } }
+    }, apiToken),
+
+    'PUT /config/image-gen-model': withAuth((body) => {
+      const { config } = (body ?? {}) as { config?: unknown }
+      try {
+        const saved = setImageGenModelConfig((config ?? null) as SetImageGenModelConfigInput | null)
+        try { hooks?.onImageGenConfigChanged?.() } catch { /* 广播失败不影响落盘结果 */ }
+        return { status: 200, body: { ok: true, config: saved } }
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } }
+      }
+    }, apiToken),
+
+    // 真测：发一条固定提示词到真实端点，验证**真能出图**（而不是只验 /models 的
+    // 连通性）。生图比文本慢得多，超时给 60s。
+    'POST /config/image-gen-model/test': withAuth(async (body) => {
+      const parsed = parseImageGenRequest(body)
+      if (parsed.error) return { status: 400, body: { error: parsed.error } }
+      try {
+        const result = await generateImage({
+          baseUrl: parsed.baseUrl,
+          ...(parsed.apiKey ? { apiKey: parsed.apiKey } : {}),
+          model: parsed.modelId,
+          prompt: IMAGE_GEN_TEST_PROMPT,
+          size: '512x512',
+          ...(parsed.sizeField ? { sizeField: parsed.sizeField } : {}),
+          timeoutMs: 60_000,
+        })
+        return {
+          status: 200,
+          body: { ok: true, bytes: result.bytes.length, mimeType: result.mimeType, source: result.source },
+        }
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } }
+      }
+    }, apiToken),
+
+    // 注册 + 选槽一次写入。`skipTest: true` 跳过真测（用户在 Settings 里已单独
+    // 测过，或额度敏感时显式跳过）。
+    'POST /config/image-gen-model/onboard': withAuth(async (body) => {
+      const parsed = parseImageGenRequest(body, { requireProviderName: true })
+      if (parsed.error) return { status: 400, body: { error: parsed.error } }
+      const skipTest = (body as { skipTest?: unknown } | undefined)?.skipTest === true
+      if (!skipTest) {
+        try {
+          await generateImage({
+            baseUrl: parsed.baseUrl,
+            ...(parsed.apiKey ? { apiKey: parsed.apiKey } : {}),
+            model: parsed.modelId,
+            prompt: IMAGE_GEN_TEST_PROMPT,
+            size: '512x512',
+            ...(parsed.sizeField ? { sizeField: parsed.sizeField } : {}),
+            timeoutMs: 60_000,
+          })
+        } catch (err) {
+          return { status: 400, body: { error: (err as Error).message } }
+        }
+      }
+      try {
+        const config = registerImageGenModelConfig({
+          providerName: parsed.providerName as string,
+          baseUrl: parsed.baseUrl,
+          ...(parsed.rawApiKey ? { apiKey: parsed.rawApiKey } : {}),
+          ...(parsed.rawApiKeyEnv ? { apiKeyEnv: parsed.rawApiKeyEnv } : {}),
+          modelId: parsed.modelId,
+          ...(parsed.sizeField ? { sizeField: parsed.sizeField } : {}),
+        })
+        try { hooks?.onImageGenConfigChanged?.() } catch { /* 广播失败不影响落盘结果 */ }
+        return { status: 200, body: { ok: true, config } }
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } }
+      }
+    }, apiToken),
+
     // Greeting LLM: welcome page dynamic greeting toggle + model selection.
     'GET /config/greeting': withAuth(() => {
       return { status: 200, body: { config: getGreetingConfig() } }
@@ -1162,5 +1331,9 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       }
       return { status: 200, body: { ok: true, loggedIn: false } }
     }, apiToken),
+
+    // 多 key 池（PR-3）：本文件零行预算，路由住在 config-routes-keys.ts，以
+    // spread 接入；该模块自带 withAuth（只依赖 auth.js），与本文件不耦合。
+    ...buildProviderKeyRoutes(apiToken),
   }
 }

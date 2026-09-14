@@ -196,6 +196,13 @@ export interface TddGateInput {
   /** 是否需要代码验证纪律（来自 DisciplineEligibility.requiresCodeVerification）。
    *  解释/分析/文档任务为 false，工程修复/重构为 true。 */
   requiresCodeVerification: boolean
+  /**
+   * 是否处于任务的真起步窗口（契约创建的最初若干轮）。缺省视为 true（纯函数
+   * 语义自洽）；调用点按 taskContract.createdAtTurn 判定后传入。台账 F6：
+   * evidence 的 filesModified 按 run 重置——任务中段的新 run 开头「零编辑」
+   * 会误成立，导致「Task start」文案在任务中段反复出现。false 时该分支静默。
+   */
+  taskStart?: boolean
 }
 
 function isTestFile(path: string): boolean {
@@ -216,6 +223,9 @@ export function checkTddGate(input: TddGateInput): ImmuneContextHint | null {
   if (!input.requiresCodeVerification) return null
   if ([...input.filesRead].some(isTestFile)) return null
   if (input.filesModified.size === 0) {
+    // 任务中段的零编辑轮（evidence 按 run 重置所致的假象）不产 Task start 文案——
+    // 该文案只属于真起步窗口（台账 F6）。缺省（undefined）保持旧行为。
+    if (input.taskStart === false) return null
     return {
       level: 'warning',
       signalKinds: ['tdd_violation'],

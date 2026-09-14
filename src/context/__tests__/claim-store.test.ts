@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ContextClaimStore } from '../claim-store.js'
@@ -10,6 +10,8 @@ import { SessionPersist } from '../../agent/session-persist.js'
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'rivet-claims-'))
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 function proposal(text = 'Do not repeat failed Read calls'): ClaimProposal {
   return {
@@ -375,6 +377,127 @@ test('evicts stale claims beyond MAX_ACTIVE_CLAIMS (50)', () => {
     // Oldest claims (lowest createdAt) should be evicted — Claim 0..4 gone, Claim 5 first remaining
     assert.equal(active[0]!.text, 'Claim 5')
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── 永久性写失败的收场（挂死源回归）─────────────────────────────────
+// 病灶：写链 catch 对所有错误一律「回填 pendingLines → 等 250ms → 重试」，且
+// finally 在 pendingLines 非空时**无限重建**链。目录被删（ENOENT）/权限变更这类
+// **永久性**错误下，250ms 定时器链永不终止 → 事件循环永远非空 → `node --test`
+// 既不打印汇总也不退出。
+// 实测：context-injection.test.ts 因 finally 里 rmSync 掉 claimStore 的目录而挂死，
+// 进而使整批被 runner 看门狗收场、跨批汇总只覆盖 1/3。
+test('写链对永久性错误放弃自动重试——不留永久定时器链', async () => {
+  const dir = tempDir()
+  const store = new ContextClaimStore(dir, 'session-perm-fail')
+  store.propose(proposal('permanent write failure probe'))
+  // 制造永久性错误：目录不存在 → appendFile 恒 ENOENT
+  rmSync(dir, { recursive: true, force: true })
+
+  await store.flushWrites(2_000)
+
+  const s = store as unknown as {
+    permanentWriteFailure?: boolean
+    writeChain?: { running: boolean }
+  }
+  assert.equal(s.permanentWriteFailure, true, '永久性写失败应被记录并停止自动重试')
+  assert.equal(s.writeChain?.running, false, '写链必须已停止（否则 250ms 定时器链永不释放）')
+})
+
+// ── 短暂文件锁的梯度重试（agent-16：AV/EDR 秒级锁会自愈）────────────────
+// 病灶：EACCES/EPERM 在永久集里「一次失败即停链」——锁自愈后链不再重试，
+// 滞留行留在内存；会话末（无新事件、无收口 flush 调用）撞锁即丢行。
+// 修复：EACCES/EPERM/EBUSY（及未知码）走梯度——连续 N 次失败才转永久；
+// 成功即清零；ENOENT 族保持立即永久（重试不改变结果）。
+test('短暂 EACCES：锁释放后梯度重试自愈（无需新事件）', async () => {
+  const dir = tempDir()
+  try {
+    const store = new ContextClaimStore(dir, 'session-lock-heal', { checkpointEveryEvents: 0 })
+    store.propose(proposal('baseline'))
+    await store.flushWrites()
+    const base = statSync(store.path).size
+
+    chmodSync(store.path, 0o444) // 短暂锁：只读（AV/EDR 扫描窗口同构）
+    store.propose(proposal('while locked'))
+    await sleep(600) // 保持锁住约 2 个重试周期
+    assert.equal(statSync(store.path).size, base, '锁未释放时不该写入')
+
+    chmodSync(store.path, 0o644) // 锁释放（扫描结束）
+    await sleep(900) // 梯度重试窗口（250ms 间隔）
+    assert.ok(statSync(store.path).size > base, '锁释放后应自愈落盘——梯度重试不依赖新事件')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('持续 EACCES 耗尽梯度：转永久停链；新事件清位后恢复', async () => {
+  const dir = tempDir()
+  try {
+    const store = new ContextClaimStore(dir, 'session-lock-exhaust', {
+      checkpointEveryEvents: 0,
+      maxTransientWriteRetries: 2,
+    })
+    store.propose(proposal('baseline'))
+    await store.flushWrites()
+    const base = statSync(store.path).size
+
+    chmodSync(store.path, 0o444)
+    store.propose(proposal('locked-1'))
+    await sleep(900) // 2 次重试耗尽 → 停链
+    chmodSync(store.path, 0o644)
+    await sleep(800)
+    assert.equal(statSync(store.path).size, base, '梯度耗尽后应停链——锁释放也不自愈（防定时器链永不终止）')
+
+    const s = store as unknown as { permanentWriteFailure?: boolean }
+    assert.equal(s.permanentWriteFailure, true, '梯度耗尽应记录为永久性失败')
+
+    // 新事件 kick 清位：环境恢复后不丢行（滞留行与最新行一起写回）
+    store.propose(proposal('after-recovery'))
+    await store.flushWrites()
+    assert.ok(statSync(store.path).size > base, '新事件应清位重试全部积压行')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── 生产收口接线契约（agent-16）────────────────────────────────────────
+// write-behind 队列在进程退出时被直接丢弃——收口 flush 必须挂在会话 shutdown
+// 路径上（TUI 的 createShutdownHandler / sidecar 的 ManagedAgent.shutdown）。
+// 源码级契约（serve-agent-gate-wiring 先例）防未来重构悄悄摘除调用点。
+test('shutdown 收口接线：TUI 与 sidecar 两条会话关闭路径均排空 claim 写链', () => {
+  const serveAgent = readFileSync(new URL('../../server/serve-agent.ts', import.meta.url), 'utf8')
+  assert.match(serveAgent, /stores\.claimStore\.flushWrites\(2_000\)/, 'sidecar 会话 shutdown 未排空 claim 写链')
+  const bootstrapSource = readFileSync(new URL('../../bootstrap.ts', import.meta.url), 'utf8')
+  assert.match(bootstrapSource, /ctx\.claimStore\.flushWrites\(2_000\)/, 'TUI shutdown 未排空 claim 写链')
+})
+
+// ── flush 撞上运行中的写链（agent-16 审查跟进项：「again 吞一拍」）──────────
+// 病灶：flush 入口 kick 若落在运行中的链上被吞为 again（不清位），链随后梯度
+// 耗尽停链——flush 只剩轮询空转到超时，一行也排不掉（shutdown flush 恰好撞上
+// AV 锁持续期的典型形态）。修复：flush 轮询观测「链停 + 有滞留」时清位重踢
+// 一次（有界防热循环）；补踢后仍停链则确认排不掉、提前返回不空转。
+test('flush 撞上运行中的写链：链随后耗尽停链时补踢排空（不空转）', async () => {
+  const dir = tempDir()
+  try {
+    const store = new ContextClaimStore(dir, 'session-flush-requeue', {
+      checkpointEveryEvents: 0,
+      maxTransientWriteRetries: 2,
+    })
+    store.propose(proposal('baseline'))
+    await store.flushWrites()
+    const base = statSync(store.path).size
+
+    chmodSync(store.path, 0o444)
+    store.propose(proposal('locked'))
+    await sleep(80) // 链第一次失败后的 250ms 退避中（running=true）
+    const flushing = store.flushWrites(1_500) // 入口 kick 撞运行中链 → again（不清位）
+    await sleep(400) // 链第二次失败 → 梯度耗尽 → 停链
+    chmodSync(store.path, 0o644) // 锁释放
+    await flushing
+    assert.ok(statSync(store.path).size > base, 'flush 应补踢已停链的滞留行——锁释放后即排空')
+  } finally {
+    try { chmodSync(join(dir, 'session-flush-requeue.claims.jsonl'), 0o644) } catch { /* gone */ }
     rmSync(dir, { recursive: true, force: true })
   }
 })

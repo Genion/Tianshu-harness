@@ -49,6 +49,9 @@ related: [../reference/observability-harness.md, ../user-guide-sandbox-permissio
 **怎么修 / 为什么**：
 
 - **在 config.json 里找不到 key 是正常的**：密钥明文只存 `~/.rivet/secrets.json`（0600 权限），配置文件里只有 `keyRef` 引用。
+- **备份 / 迁移配置时要连 secrets.json 与 provider-keys.json 一起带走**：只备份 `config.json` 会漏掉密钥材料，换机后表现为「配置还在但每个 provider 都 401」。这三个文件同目录（`RIVET_HOME` 或 `RIVET_CONFIG_PATH` 所在目录），职责分工是——`config.json` 存 provider / 模型 / `keyRef` 指针；`secrets.json` 存 `keyRef → 明文密钥`（0600）；`provider-keys.json` 存多 key 池（每个 key 的模型归属与凭据槽）。
+  - 为什么单独成文：多 key 池原本在 `config.json` 里，但旧版 rivet 的 schema 不认识 `keys` 字段，一次无关写入就会静默抹掉整池（`loadConfig` strip + `saveConfig` 原样回写）。移出旧版视野后，冲突从「被缓解」变成「无法发生」——代价就是它落在了原有备份面之外。
+  - 只搬 `provider-keys.json` 不搬 `secrets.json` 同样不行：池里存的仍是 `keyRef` 指针，明文在 secrets 侧。
 - 也可以走环境变量（如 `export DEEPSEEK_API_KEY=sk-xxx`），仅当前 shell 有效。
 - codex 等订阅型服务商走 OAuth 浏览器授权：`/login` 或终端 `rivet config login codex`。
 - 配错了想整组清除：`/disconnect`——删除该 provider 条目、其注册的模型列表，并清除托管密钥。

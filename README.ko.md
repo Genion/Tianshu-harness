@@ -692,6 +692,17 @@ TUI는 CLI의 기본 표면입니다. 데스크톱 앱（Tauri）과 VS Code/Cur
 
 **파일 수정 없는 원클릭 시작**: `/config` → Basics →「최소 셋 星域 바인딩」——어떤 星域을 선택（changgeng 또는 taiyi 등）하면 저장 시 자동으로 `defaultDomain` 고정 + 해당 星域의 taiyi 최소 도구 셋 덮어쓰기가 기록됩니다（lean 리소스 감축은 포함하지 않음）. 이후 `rivet`를 그냥 시작해도 그 星域의 최소 셋 세션으로 들어갑니다. 「기본 모델」필드（`agent.defaultModel`, `provider:modelId` 형식）와 함께 쓰면 인자 없이 완전히 시작할 수 있습니다. 바인딩을 지우면 기본 星域으로 복귀합니다（星域 덮어쓰기 구성은 유지）. 데스크톱 동일 항목: 설정 → 시스템 →「최소 셋 星域 바인딩」.
 
+### 🎨 이미지 생성（텍스트→이미지）
+
+OpenAI 형식의 텍스트→이미지 엔드포인트（SiliconFlow, OpenAI Images 등）를 등록하면 `generate_image` 도구로 이미지를 만들 수 있습니다.
+
+- **전용 슬롯 `agent.imageGenModel`**——`provider.default`와 `agent.defaultModel`은 **전혀 바뀌지 않습니다**（프리픽스 캐시 앵커 유지）. 설정하기 전까지는 도구가 도구 목록에 들어가지 않아, 사용하지 않는 분께는 영향이 없습니다.
+- **경로만 반환, 바이트는 반환하지 않음**：이미지는 디스크에 저장하고 대화에는 로컬 경로만 돌려줍니다. **base64는 컨텍스트에 들어가지 않습니다**（오류 문구에도）.
+- **데스크톱**：설정 → 이미지 생성 모델——엔드포인트 등록, **실제로 그리는 연결 테스트**（생성 크레딧을 1회 소모합니다）, 등록된 모델 드롭다운 선택. **등록 후 현재 세션에 즉시 반영**됩니다.
+- 크기 필드 이름은 설정 가능합니다（OpenAI는 `size`, SiliconFlow는 `image_size`）. 일반적인 응답 형태는 자동 판별됩니다. ComfyUI 네이티브 API는 미지원입니다（OpenAI 호환 브리지 필요）.
+
+등록 방법과 파라미터 상세는 [모델 설정](#-모델-설정)의「이미지 생성」을 참조하세요.
+
 ## ⚙️ 모델 설정
 
 ### 다중 제공자 + 적응형 라우팅
@@ -740,6 +751,13 @@ config.json을 직접 편집할 수도 있습니다（덮어써야 할 필드만
 - 메인 컨트롤 모델이 `supportsVision`을 선언하면 직접 이미지를 봅니다. 그렇지 않으면 `agent.visionModel` 인식 브리지를 구성해 먼저 비전 모델이 텍스트로 변환한 뒤 메인 컨트롤에 넘길 수 있습니다.
 - 내장 비전 모델과 브리지 구성, `/vision` 발견 마법사, `ask_image` 추가 질문, 데스크톱/TUI 설정 진입점에 대한 자세한 내용은 [이미지 인식 사용자 매뉴얼](docs/user-guide-vision.md)을 참조하세요.
 - 이미지는 대화 꼬리에 추가되어 **프리픽스 캐시를 끊지 않습니다**; 지원하지 않는 이미지는 명시적으로 경고하며 조용히 버리지 않습니다.
+
+### 이미지 생성（텍스트→이미지）
+
+- 전용 슬롯 `agent.imageGenModel`（데스크톱: 「설정 → 이미지 생성 모델」）：OpenAI 형식의 텍스트→이미지 엔드포인트（SiliconFlow, OpenAI Images 등）를 등록하면 `generate_image` 도구로 이미지를 만들 수 있습니다.
+- **작업 모델과 `provider.default`는 전혀 바뀌지 않습니다**——이미지 프로바이더는 별도로 등록되며, 설정하기 전까지는 도구가 도구 목록에 들어가지 않아 프리픽스 캐시에 영향이 없습니다.
+- 크기 필드 이름은 설정 가능하며（OpenAI는 `size`, SiliconFlow는 `image_size`），일반적인 응답 형태는 자동 판별됩니다. 결과물은 **로컬 파일 경로만 반환하고 base64는 컨텍스트에 들어가지 않습니다**.
+- ComfyUI 네이티브 API는 지원 범위 밖입니다（workflow 제출 → history 폴링 → `/view` 가져오기의 3단계）. 먼저 OpenAI 호환 브리지 플러그인을 로컬에 설치하세요.
 
 ### Worker 라우팅（서브에이전트별 다른 모델）
 
@@ -1073,6 +1091,12 @@ rivet logs open desktop            # 打开 sidecar 日志目录（GUI 起不来
       "model": "MiniMax-M3"
     },
     "visionAutoBridge": false,    // 未配 visionModel 时自动挑一个可用视觉模型（默认关）
+    "imageGenModel": {            // 이미지 생성 슬롯: 엔드포인트 등록 후 generate_image로 이미지 생성
+      "provider": "siliconflow-image",  // 별도 등록 프로바이더 — provider.default는 그대로
+      "model": "black-forest-labs/FLUX.2-pro",
+      "size": "1024x1024",        // 기본 크기(선택)
+      "sizeField": "image_size"   // OpenAI는 size, SiliconFlow는 image_size(선택)
+    },
     "permissions": {              // 权限规则（对应 /permission 命令）
       "allow": [{ "tool": "read" }],
       "deny":  [{ "tool": "bash", "params": { "command": "rm -rf" } }],

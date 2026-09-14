@@ -5,6 +5,8 @@ import type { TaskListItem } from './session-state.js'
 import {
   buildHeuristicRetrievalRoute,
   extractAskLine,
+  foldMultiPartObjective,
+  hasMultipleListItems,
   normalizeRetrievalRoute,
   type IntentTaskKind,
   type RetrievalRoute,
@@ -79,7 +81,13 @@ export function buildIntentRouterPrompt(input: {
 
   const firstLine = input.userMessage.split('\n')[0]?.trim() || ''
   const askLine = extractAskLine(input.userMessage)
-  const objective = (askLine && askLine !== firstLine ? askLine : (input.taskContract?.objective || firstLine)).slice(0, 240)
+  // 多子任务消息（≥2 列表项）：单行 askLine 只留最后一项（台账 F8：三问题消息只剩
+  // 问题 3，分类器据此出的 sources 会漏前两个问题的方向）——折叠概述覆盖各子任务。
+  const objective = (
+    hasMultipleListItems(input.userMessage)
+      ? foldMultiPartObjective(input.userMessage, 240)
+      : (askLine && askLine !== firstLine ? askLine : (input.taskContract?.objective || firstLine))
+  ).slice(0, 240)
   const mentionedFiles = input.taskContract?.scope.mentionedFiles.slice(0, 5).join(', ') || 'none'
   const constraints = input.taskContract?.constraints.slice(0, 3).join(' | ') || 'none'
   const snippet = sanitized.replace(/\s+/g, ' ').slice(0, 500)

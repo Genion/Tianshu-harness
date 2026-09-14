@@ -8,6 +8,7 @@ import { FILE_INFO_TOOL } from './file-info.js'
 import { CREATE_DOCUMENT_TOOL } from './create-document.js'
 import { CREATE_SPREADSHEET_TOOL } from './create-spreadsheet.js'
 import { CREATE_IMAGE_TOOL } from './create-image.js'
+import { createGenerateImageTool } from './generate-image.js'
 import { CREATE_PRESENTATION_TOOL } from './create-presentation.js'
 import { CREATE_PDF_TOOL } from './create-pdf.js'
 import { EXPORT_FILE_TOOL } from './export-file.js'
@@ -99,6 +100,9 @@ export function createDefaultToolRegistry(extraTools: Tool[] = [], options: Defa
     registry.register(CREATE_DOCUMENT_TOOL)
     registry.register(CREATE_SPREADSHEET_TOOL)
     registry.register(CREATE_IMAGE_TOOL)
+    // 生图（issue #8）：仅当 agent.imageGenModel 已配置时进 tool definitions——
+    // isEnabled 在 getDefinitions 层过滤，未配置时对前缀缓存零字节影响。
+    registry.register(createGenerateImageTool())
     registry.register(CREATE_PRESENTATION_TOOL)
     registry.register(CREATE_PDF_TOOL)
   }

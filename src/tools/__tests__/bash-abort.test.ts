@@ -47,13 +47,17 @@ test('abort 时 bash 立即 settle（不等命令自然结束）', async () => {
   const start = Date.now()
   const p = BASH_TOOL.execute(makeParams('sleep 30', ctrl.signal, cwd))
   await sleepMs(100)
+  const abortAt = Date.now()
   ctrl.abort()
   const result = await Promise.race([
     p,
-    sleepMs(2000).then(() => { throw new Error('bash 未在 2s 内 settle —— abort 未生效') }),
+    sleepMs(10_000).then(() => { throw new Error('bash 未在 10s 内 settle —— abort 未生效') }),
   ])
-  const elapsed = Date.now() - start
-  assert.ok(elapsed < 2000, `应迅速 settle，实际 ${elapsed}ms`)
+  const settleMs = Date.now() - abortAt
+  // 契约是「abort 后立即 settle，不等 30s 自然结束」。settle 本身在码内即时，
+  // 但 spawn/调度在并发负载下可达秒级——预算按负载容忍给（D 波遗留 b 曾见 2688ms）。
+  assert.ok(settleMs < 5_000, `abort 后应在 5s 内 settle，实际 ${settleMs}ms`)
+  assert.ok(Date.now() - start < 15_000, `全程应远小于自然结束 30s，实际 ${Date.now() - start}ms`)
   assert.equal((result as { isError?: boolean }).isError, false, 'abort 是用户行为，非失败')
   rmSync(cwd, { recursive: true, force: true })
 })

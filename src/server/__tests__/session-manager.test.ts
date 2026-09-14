@@ -884,6 +884,28 @@ test('Phase 2: abort 后收尾自动 flush——打断后发的消息不再躺 l
   assert.equal(manager.getSession(s.id)!.status, 'running', 'flush 开的新一轮接管会话')
 })
 
+test('Phase 2: 上轮被 abort 时 flush 归并头切换为「已被用户打断」', async () => {
+  const { manager, agents } = makeManager()
+  const s = manager.createSession({ prompt: 'go' })
+  manager.queue(s.id, 'stop 期间排的消息')
+  manager.abort(s.id)
+  await waitUntil(() => agents[0]!.prompts.length === 2)
+  assert.equal(
+    agents[0]!.prompts[1],
+    '[排队跟进 — 上轮已被用户打断，以下是打断后的新指示，请以此为准]\nstop 期间排的消息',
+  )
+  assert.equal(manager.getSession(s.id)!.status, 'running', 'flush 开的新一轮在跑')
+})
+
+test('Phase 2: 上轮正常完成时归并头不变（回归守卫）', async () => {
+  const { manager, agents } = makeManager()
+  const s = manager.createSession({ prompt: 'go' })
+  manager.queue(s.id, 'lane one')
+  agents[0]!.finish()
+  await waitUntil(() => agents[0]!.prompts.length === 2)
+  assert.equal(agents[0]!.prompts[1], '[排队跟进 — 上轮运行期间排队，请一并处理]\nlane one')
+})
+
 test('Phase 2: watchdog stall 时 flush 让位——lane 由续跑的 run 归并（不抢跑吞续跑）', async () => {
   const { manager, agents } = makeManager()
   const s = manager.createSession({ prompt: 'go' })
@@ -1294,6 +1316,36 @@ test('PlusMenu: listModels flags current; switchModel updates record + emits', a
   assert.equal(after.find((m) => m.id === 'model-b')!.current, true)
   const ev = manager.getEvents(s.id, 0)!.events.find((e) => e.type === 'model_switched')!
   assert.equal(ev.data.modelId, 'model-b')
+})
+
+// 多 key（PR 合入收口）：current 判定必须区分 keyId——PR#11 的桌面分组已按
+// provider×keyId 出条目，但 record.model 的写路径（serve-agent）与判定（本处）
+// 都停在两段式：同 provider 双 key 挂同 wire id 时两条都判 current，IntelligenceMenu
+// 对 m.current 早退 → 两条都点不动、无法再换 key；resume 也会静默用首个命中的账号。
+// 修复后写路径记三段式，判定精确到 key；两段式旧记录兜底只标首个匹配（对齐
+// resolveModelSpec「扫首个命中」的实际语义）。
+test('PlusMenu（多 key）：三段式记录只标对应 key；两段式记录只标首个匹配', async () => {
+  const models: ModelOption[] = [
+    { id: 'glm-5.2', alias: 'm28', provider: 'glm', keyId: 'default', contextWindow: 128000 },
+    { id: 'glm-5.2', alias: 'm28', provider: 'glm', keyId: 'backup', contextWindow: 128000 },
+  ]
+  const manager = new RuntimeSessionManager({
+    createAgent: () => new PlusFakeAgent(),
+    defaultCwd: '/tmp/work',
+    listModels: () => models,
+    defaultModelId: 'glm-5.2',
+  })
+
+  // 三段式（多 key 切换后的记录形态）：只标 backup 那条
+  const s1 = manager.createSession({ model: 'glm:backup:glm-5.2' })
+  const three = manager.listModels(s1.id)!
+  assert.equal(three.find((m) => m.keyId === 'backup')!.current, true, '三段式记录精确命中对应 key')
+  assert.equal(three.find((m) => m.keyId === 'default')!.current, false, '同 wire id 的另一 key 不标 current')
+
+  // 两段式（旧会话/未迁移残留）：不得两条都标——首个匹配胜出
+  const s2 = manager.createSession({ model: 'glm:glm-5.2' })
+  const two = manager.listModels(s2.id)!
+  assert.equal(two.filter((m) => m.current).length, 1, '两段式记录只标一条（否则两条都点不动）')
 })
 
 // a976167f 新建会话模型优先级：显式 input.model > 项目配置默认 provider 首模型

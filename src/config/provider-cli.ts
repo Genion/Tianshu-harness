@@ -5,12 +5,13 @@
  * wizard; same-name writes require explicit --force.
  */
 import { loadConfig, registerProvider, removeProvider, getApiKeyStatus } from './manager.js'
-import { readSecret } from './secrets-store.js'
+import { tryResolveCredentialKey } from '../api/factory.js'
 import { probeProvider, aliasTableWithProbeInfos, type ProbeReport } from '../api/provider-probe.js'
 import { normalizeBaseUrl } from '../api/endpoint-map.js'
 import { matchModelIds, type ModelMatchResult } from '../api/model-id-matcher.js'
 import type { ModelAliasMetadata } from '../api/model-aliases.js'
 import type { ModelConfig } from './schema.js'
+import { contractModels } from './contract-models.js'
 
 export interface ProviderCliIO {
   write?: (line: string) => void
@@ -51,16 +52,16 @@ Examples:
   rivet provider models my-relay`)
 }
 
-/** Resolve a usable API key without throwing — local endpoints need none. */
+/** 解析可用 API key 的「尽力而为」入口——本地端点无需 key，故不抛错。
+ *  直接复用 factory 的三槽解析（keyRef→apiKey→apiKeyEnv→`<NAME>_API_KEY`）：
+ *  此前这里有一份平行实现，与 resolveApiKey 的链路各写一遍，正是漂移的来源。 */
 function bestEffortApiKey(provider: { apiKey?: string; apiKeyEnv?: string; keyRef?: string; name: string }): string | undefined {
-  if (provider.keyRef) {
-    const secret = readSecret(provider.keyRef)
-    if (secret) return secret
-  }
-  if (provider.apiKey) return provider.apiKey
-  if (provider.apiKeyEnv && process.env[provider.apiKeyEnv]) return process.env[provider.apiKeyEnv]
-  const standard = process.env[`${provider.name.toUpperCase()}_API_KEY`]
-  return standard
+  return tryResolveCredentialKey({
+    name: provider.name,
+    keyRef: provider.keyRef,
+    apiKey: provider.apiKey,
+    apiKeyEnv: provider.apiKeyEnv,
+  })
 }
 
 /**
@@ -204,7 +205,7 @@ async function cmdProbe(args: string[], io: ProviderCliIO): Promise<void> {
     apiKey: bestEffortApiKey(provider),
     protocol: provider.protocol,
     providerName: name,
-    probeModel: provider.models[0]?.id,
+    probeModel: contractModels(provider)[0]?.id,
   })
   for (const line of formatProbeSummary(report)) out(io, line)
   if (report.models.length > 0) out(io, `Models: ${report.models.join(', ')}`)
@@ -221,7 +222,7 @@ function cmdList(io: ProviderCliIO): void {
   for (const [name, provider] of entries) {
     const key = getApiKeyStatus(name)
     const star = name === cfg.provider.default ? ' *' : ''
-    out(io, `${name}${star}  [${provider.protocol}]  ${provider.baseUrl}  models=${provider.models.length}  key=${key.source === 'none' ? 'missing' : key.source}`)
+    out(io, `${name}${star}  [${provider.protocol}]  ${provider.baseUrl}  models=${contractModels(provider).length}  key=${key.source === 'none' ? 'missing' : key.source}`)
   }
 }
 

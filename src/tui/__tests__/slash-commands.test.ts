@@ -1708,3 +1708,40 @@ describe('mcpStatusText（/mcp 裸命令真实状态，与 /debug mcp 同源）'
     assert.match(text, /mcp__context7__resolve/)
   })
 })
+
+describe('/fast — 禅模式跳过（zen 回流 Wave 5）', () => {
+  it('promoteZen 返回 true：输出「已解除」文案并携带备注', async () => {
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/fast', '改完再看'],
+      agent: { promoteZen: (_r: string) => true } as any,
+      pushStatic: (line: LogEntry) => { captured += JSON.stringify(line) },
+    })
+    await handleSlashCommand(ctx)
+    assert.match(captured, /禅模式已解除/, `实际：${captured}`)
+    assert.match(captured, /改完再看/)
+  })
+
+  it('promoteZen 返回 false：输出「未激活或已解除」，不谎报已解除', async () => {
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/fast'],
+      agent: { promoteZen: () => false } as any,
+      pushStatic: (line: LogEntry) => { captured += JSON.stringify(line) },
+    })
+    await handleSlashCommand(ctx)
+    assert.match(captured, /未激活或已解除/, `实际：${captured}`)
+    assert.doesNotMatch(captured, /已解除：/, `不得谎报解除：${captured}`)
+  })
+
+  it('以 user 原因调用 promoteZen（/fast 语义 = 用户跳过）', async () => {
+    const reasons: string[] = []
+    const ctx = makeCtx({
+      parts: ['/fast'],
+      agent: { promoteZen: (r: string) => { reasons.push(r); return true } } as any,
+      pushStatic: () => {},
+    })
+    await handleSlashCommand(ctx)
+    assert.deepEqual(reasons, ['user'])
+  })
+})

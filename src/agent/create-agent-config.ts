@@ -23,6 +23,7 @@ import { applyDescriptionMode } from '../tools/description-compact.js'
 import { inferModelTierFromName, type ModelTier } from './model-tier-policy.js'
 import { isRuntimeLeanForDomain } from '../config/runtime-lean.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
+import { contractModels } from '../config/contract-models.js'
 
 export interface ModelSpec {
   id: string
@@ -54,6 +55,7 @@ export interface AgentConfigInput {
   dreamEnabled?: boolean
   runtimeLean?: boolean
   securityGuidance?: boolean
+  interruptMarker?: boolean
   hearthObserveEnabled?: boolean
   antiAnchoring?: AntiAnchoringConfig
   intentRetrievalRouter?: IntentRetrievalRouterConfigInput
@@ -153,6 +155,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
     // 用域值（如 taiyi 域默认 lean）；env 主开关恒优先。auto 域回退全局。
     runtimeLean: isRuntimeLeanForDomain(params.config.agent.defaultDomain, params.config.runtime, params.cwd),
     securityGuidance: params.config.agent.securityGuidance,
+    interruptMarker: params.config.agent.interruptMarker,
     hearthObserveEnabled: params.config.agent.hearthObserveEnabled,
     crossSessionEnabled: params.config.agent.crossSessionEnabled,
     antiAnchoring: params.config.agent.antiAnchoring,
@@ -193,7 +196,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
 
 export function createAgentConfig(input: AgentConfigInput): Pick<
   AgentConfig,
-  'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'runtimeLean' | 'securityGuidance' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer'
+  'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'runtimeLean' | 'securityGuidance' | 'interruptMarker' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer'
 > {
   const { model, apiKey, cwd, provider } = input
   const capabilities = resolveCapabilities(provider.name, provider.capabilities, model.capabilities)
@@ -228,7 +231,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
   const primarySupportsVision = model.supportsVision ?? false
   const visionBridge = primarySupportsVision ? undefined : buildVisionClient(input)
 
-  const modelPricing = provider.models.find(m => m.id === model.id || m.alias === model.id)?.pricing
+  const modelPricing = contractModels(provider).find(m => m.id === model.id || m.alias === model.id)?.pricing
 
   // 复盘修复（2026-07-25）：每次创建 agent 前丢弃进程级 memo——长驻 sidecar
   // 同进程多会话时，改完配置开新会话必须吃到新档位（文档承诺）。活会话不受
@@ -303,6 +306,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     dreamEnabled: input.dreamEnabled,
     runtimeLean: input.runtimeLean,
     securityGuidance: input.securityGuidance,
+    interruptMarker: input.interruptMarker,
     hearthObserveEnabled: input.hearthObserveEnabled,
     crossSessionEnabled: input.crossSessionEnabled,
     antiAnchoring: input.antiAnchoring,
@@ -386,8 +390,12 @@ export function resolveFallbackModel(fp: ProviderConfig): ModelConfig {
     return inferModelTierFromName(m.id) ?? 'balanced'
   }
 
+  // 多 key：模型清单走契约层（contractModels）——顶层 models 是迁移快照，key 级
+  // 增删不回写；直接读它会让回落选到已删除的模型、或漏掉用户新加的兜底。
+  const pool = contractModels(fp)
+
   const preferred = fp.fallbackModel
-    ? fp.models.find(m => m.id === fp.fallbackModel || m.alias === fp.fallbackModel)
+    ? pool.find(m => m.id === fp.fallbackModel || m.alias === fp.fallbackModel)
     : undefined
 
   const allowProFallback = fp.allowProFallback ?? false
@@ -400,7 +408,7 @@ export function resolveFallbackModel(fp: ProviderConfig): ModelConfig {
 
   // 3. preferred is strong but pro fallback forbidden → downgrade to cheap
   if (preferred && tierOf(preferred) === 'strong' && !allowProFallback) {
-    const cheap = fp.models.find(m => tierOf(m) === 'cheap')
+    const cheap = pool.find(m => tierOf(m) === 'cheap')
     if (cheap) {
       console.warn(`[fallback] ${preferred.id} is strong tier and allowProFallback=false; downgrading to ${cheap.id}`)
       return cheap
@@ -409,15 +417,15 @@ export function resolveFallbackModel(fp: ProviderConfig): ModelConfig {
 
   // 4. no preferred or not allowed → prefer cheap, then balanced, then strong
   const candidates = [
-    ...fp.models.filter(m => tierOf(m) === 'cheap'),
-    ...fp.models.filter(m => tierOf(m) === 'balanced'),
-    ...(!allowProFallback ? [] : fp.models.filter(m => tierOf(m) === 'strong')),
+    ...pool.filter(m => tierOf(m) === 'cheap'),
+    ...pool.filter(m => tierOf(m) === 'balanced'),
+    ...(!allowProFallback ? [] : pool.filter(m => tierOf(m) === 'strong')),
   ]
   if (candidates.length > 0) return candidates[0]!
 
   // 5. legacy fallback: if pro is forbidden and no cheap/balanced exists, still
   //    need a model to avoid breaking the chain — fall back to the first model.
-  return fp.models[0]!
+  return pool[0]!
 }
 
 function buildFallbackChain(
@@ -479,7 +487,7 @@ export function resolveCompactProviderName(input: {
   const model = input.compact.model
   if (!model) return undefined
   const hasModel = (prov: ProviderConfig) =>
-    prov.models.some(m => m.id === model || m.alias === model)
+    contractModels(prov).some(m => m.id === model || m.alias === model)
   if (hasModel(input.provider)) return input.provider.name
   for (const [name, prov] of Object.entries(input.allProviders ?? {})) {
     if (hasModel(prov)) return name
@@ -506,7 +514,7 @@ function buildCompactClient(
     input.provider.name === compactProvider ? input.provider : undefined
   )
   if (!prov) return undefined
-  const spec = prov.models.find(m => m.id === compactModel || m.alias === compactModel)
+  const spec = contractModels(prov).find(m => m.id === compactModel || m.alias === compactModel)
   if (!spec) return undefined
 
   let apiKey = ''
@@ -638,7 +646,7 @@ function visionCandidates(
   const candidates: Array<{ prov: ProviderConfig; spec: ModelConfig }> = []
   for (const prov of Object.values(providers)) {
     if (opts?.sameProviderOnly && prov.name !== input.provider.name) continue
-    for (const spec of prov.models) {
+    for (const spec of contractModels(prov)) {
       if (spec.supportsVision) candidates.push({ prov, spec })
     }
   }
@@ -696,7 +704,7 @@ function buildVisionClient(input: AgentConfigInput): VisionBridgeBuild | undefin
   const ref = `${vm.provider}/${vm.model}`
   const prov = input.allProviders?.[vm.provider]
   if (!prov) return warnVisionBridge(`prov:${ref}`, `provider "${vm.provider}" 不在已配置的 provider 列表里`)
-  const spec = prov.models.find(m => m.id === vm.model || m.alias === vm.model)
+  const spec = contractModels(prov).find(m => m.id === vm.model || m.alias === vm.model)
   if (!spec) return warnVisionBridge(`model:${ref}`, `provider "${vm.provider}" 下没有模型 "${vm.model}"`)
   // 不拦：手改配置可以指一个非视觉模型，那时桥能连上但描述必然是瞎猜。
   if (!spec.supportsVision) {
@@ -714,7 +722,7 @@ function buildVisionClient(input: AgentConfigInput): VisionBridgeBuild | undefin
   if (fb) {
     const fbRef = `${fb.provider}/${fb.model}`
     const fbProv = input.allProviders?.[fb.provider]
-    const fbSpec = fbProv?.models.find(m => m.id === fb.model || m.alias === fb.model)
+    const fbSpec = fbProv ? contractModels(fbProv).find(m => m.id === fb.model || m.alias === fb.model) : undefined
     if (!fbProv || !fbSpec) {
       warnVisionBridge(`fbmodel:${fbRef}`, `备用识图模型 ${fbRef} 不存在，降级为单桥`)
     } else {

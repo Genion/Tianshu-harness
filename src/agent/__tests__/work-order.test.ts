@@ -44,6 +44,34 @@ describe('work-order contract', () => {
     assert.equal(order.aggregationPolicy, 'primary_decides')
   })
 
+  // 2026-09-13（只读报告截断族）：收尾/修复轮的 max_tokens 取
+  // min(16384, budget.maxTokens)。旧 4096 兜底让 findings 多的只读报告顶格
+  // 截断成畸形 JSON（同因实测见 worker-runtime.ts:157——探索轮早已放宽 16384，
+  // 收尾轮这条路径漏了）。未声明档位的 profile 一律落报告档。
+  it('un-declared profiles fall to the report tier (16384), not the legacy 4096', () => {
+    const order = createReadOnlyWorkOrder({
+      id: 'wo_report_budget',
+      parentTurnId: 'turn_1',
+      kind: 'review',
+      profile: 'code_scout',
+      objective: 'probe report budget',
+      scope: {},
+    })
+    assert.equal(order.budget.maxTokens, 16384)
+  })
+
+  it('a profile-declared defaultMaxTokens still wins (format_checker stays 4096)', () => {
+    const order = createReadOnlyWorkOrder({
+      id: 'wo_format_budget',
+      parentTurnId: 'turn_1',
+      kind: 'review',
+      profile: 'format_checker',
+      objective: 'probe format budget',
+      scope: {},
+    })
+    assert.equal(order.budget.maxTokens, 4096)
+  })
+
   it('accepts all built-in registry profiles in work orders', () => {
     const architect = createReadOnlyWorkOrder({
       id: 'wo_architect',

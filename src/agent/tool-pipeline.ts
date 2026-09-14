@@ -62,6 +62,7 @@ import { buildSensitivePreflightMessage, shouldRequireSensitivePreflight } from 
 import { toolTargetFromInput } from './tool-target.js'
 import { execFileGit } from '../tools/spawn-git.js'
 import { patchTargetPaths, preWriteClaimPaths } from './pre-write-claims.js'
+import { WRITE_TOOL_NAMES, extractWriteFilePaths } from '../tools/write-tool-helpers.js'
 
 /** Headless prefix on denial messages — a stable marker so worker-session's
  *  detectApprovalDeadlock can distinguish "gated by approval" from "bad JSON". */
@@ -355,6 +356,9 @@ export interface ToolPipelineDeps {
   sessionTurnCount: number
   sessionId: string | undefined
   abortSignal?: AbortSignal
+  /** Zen 相位下未注册工具（幻觉调用）报错的行动指引：返回非空文本时附加到
+   *  registry 的 Unknown tool 报错之后（不晋升，但给模型 zen_unlock 出路）。 */
+  getZenUnregisteredHint?: (toolName: string) => string | undefined
   /** Capture an agent's departure mark (leave_mark tool) for 主控 to record at close. */
   onLeaveMark?: (mark: import('../tools/types.js').LeaveMarkInput) => void
   /** U6/C1: capture goal decomposition from plan_steps into the loop's PlanExecutionTrace. */
@@ -431,6 +435,8 @@ export interface ToolPipelineDeps {
   onGateBlocked?: (kind: string) => void
   /** P1b: TDD gate 同 target 被拦计数回调 */
   onTddBlocked?: (target?: string) => void
+  /** E6 测试接缝：覆写 checkpoint 工厂以模拟创建失败。生产路径不传 → 用真实现。 */
+  createCheckpoint?: typeof createCheckpoint
 }
 
 export interface ToolExecResult {
@@ -756,6 +762,8 @@ async function executeToolUseInner(
 ): Promise<ToolExecResult> {
   let { traceStore, importGraph, lastConflictCheckCount, latestRisk } = deps
   let checkpointCreated = checkpointAlreadyCreated
+  // E6：本回合首次建基线失败时置起，尾部追加给模型与用户看（见下方 checkpoint 块）。
+  let checkpointFailureNote: string | undefined
 
   // 无进展哨兵的活动 key（工具级，2026-09-10 纵深修复）：pre 段（审批/checkpoint/
   // 快照）与 post 段（hooks/LSP/artifact/账本/影响面）都打在它上面——stall 告警
@@ -1347,18 +1355,36 @@ async function executeToolUseInner(
     // before bash runs — not only before write_file/edit_file.
     if (isMutatingTool(tu.name) && !checkpointCreated) {
       touchActivity(activityKey, `tool:${tu.name}:pre:checkpoint`)
-      const cp = await createCheckpoint(deps.cwd, 'auto', deps.config.sessionId)
-      checkpointCreated = true
-      if (cp) callbacks.onCheckpoint?.(cp.hash)
+      const cp = await (deps.createCheckpoint ?? createCheckpoint)(deps.cwd, 'auto', deps.config.sessionId)
+      // E6：失败不得置位——旧代码无条件置位会掩盖失败，本回合剩余破坏性操作全落在
+      // 回滚窗外且后续回合永不再重试（静默蒸发）。保留 false = 下个破坏性工具前重试。
+      if (cp) {
+        checkpointCreated = true
+        callbacks.onCheckpoint?.(cp.hash)
+      } else {
+        checkpointFailureNote = '[checkpoint] 回滚基线创建失败——本回合的自动回滚不可用，请谨慎操作'
+      }
    }
 
-    if ((tu.name === 'write_file' || tu.name === 'edit_file') && typeof tu.input.file_path === 'string') {
-      recordAgentTouchedFile(deps.cwd, tu.input.file_path, deps.config.sessionId)
-   }
+    // 写工具账本收口：recordAgentTouchedFile 是 rollbackToCheckpoint 的唯一文件
+    // 来源——漏记 = 修改落在 YOLO 档 safety net（checkpoints + rollback）的回滚窗外。
+    if (WRITE_TOOL_NAMES.has(tu.name)) {
+      for (const editPath of extractWriteFilePaths(tu.name, tu.input)) {
+        recordAgentTouchedFile(deps.cwd, editPath, deps.config.sessionId)
+      }
+    }
 
-    if (deps.config.fileHistory && (tu.name === 'write_file' || tu.name === 'edit_file') && typeof tu.input.file_path === 'string') {
-      touchActivity(activityKey, `tool:${tu.name}:pre:track-edit`)
-      await deps.config.fileHistory.trackEdit(tu.input.file_path, tu.id)
+    // E4 记账收口：五件写工具（WRITE_TOOL_NAMES）的编辑都要在执行前进
+    // file-history（/undo 与边界回溯的记账源头）。路径按 extractWriteFilePaths
+    // 解析：ast_edit 的 dryRun 为空不记账，apply_patch 的纯删除 /dev/null 跳过。
+    if (deps.config.fileHistory && WRITE_TOOL_NAMES.has(tu.name)) {
+      const editPaths = extractWriteFilePaths(tu.name, tu.input)
+      if (editPaths.length > 0) {
+        touchActivity(activityKey, `tool:${tu.name}:pre:track-edit`)
+        for (const editPath of editPaths) {
+          await deps.config.fileHistory.trackEdit(editPath, tu.id)
+        }
+      }
    }
 
     // Execute via TurnHarness
@@ -1453,8 +1479,18 @@ async function executeToolUseInner(
           const composedSignal = deps.abortSignal
             ? AbortSignal.any([deps.abortSignal, toolAbort.signal])
             : toolAbort.signal
+          // Zen 相位下未注册工具（幻觉调用）不晋升，但把 registry 的裸
+          // Unknown tool 报错变成可行动的 zen_unlock 指引，避免死路重试。
+          const execution = deps.config.toolRegistry.execute(tu.name, { ...params, approvalMode, abortSignal: composedSignal })
+          const zenGuardedExecution = execution.catch(err => {
+            const zenHint = deps.getZenUnregisteredHint?.(tu.name)
+            if (zenHint) {
+              throw new Error(`${err instanceof Error ? err.message : String(err)}\n${zenHint}`)
+            }
+            throw err
+          })
           const r = await withToolTimeout(
-            deps.config.toolRegistry.execute(tu.name, { ...params, approvalMode, abortSignal: composedSignal }),
+            zenGuardedExecution,
             tu.name,
             toolTimeout,
             deps.abortSignal,
@@ -1512,8 +1548,17 @@ async function executeToolUseInner(
 
     // LSP: notify the language server that a file changed on disk.
     // Must happen BEFORE diagnostics so the server's view is current.
-    if (!harnessResult.isError && (tu.name === 'edit_file' || tu.name === 'write_file' || tu.name === 'apply_patch')) {
-      (deps.getLspManager?.() ?? deps.lspManager)?.changeFile(tu.input.file_path as string)
+    // E4 通知收口：名单用 WRITE_TOOL_NAMES，路径按工具解析。apply_patch 走
+    // patchTargetPaths（删除经 `--- ` 回退也在内，让 LSP 得知文件消失、清过期
+    // 诊断）——旧代码对它恒传 undefined 的 file_path，通知从未真正到达。
+    if (!harnessResult.isError && WRITE_TOOL_NAMES.has(tu.name)) {
+      const changedPaths = tu.name === 'apply_patch' && typeof tu.input.diff === 'string'
+        ? patchTargetPaths(tu.input.diff)
+        : extractWriteFilePaths(tu.name, tu.input)
+      const lsp = deps.getLspManager?.() ?? deps.lspManager
+      for (const changedPath of changedPaths) {
+        lsp?.changeFile(changedPath)
+      }
    }
 
     // T4: LSP diagnostics via lspManager (async file-level, ~2s timeout)
@@ -1677,6 +1722,11 @@ async function executeToolUseInner(
       finalContent = `${finalContent}\n\n[TDD] ${tddSuggestNote}`
     }
 
+    // E6：回滚窗警示尾部追加（同 tddSuggestNote 模式），截断/artifact 化都动不到它。
+    if (checkpointFailureNote) {
+      finalContent = `${finalContent}\n\n${checkpointFailureNote}`
+    }
+
     // Normalize isError: tools may omit isError on success (undefined),
     // but the TUI treats undefined as a streaming chunk that never
     // commits to scrollback. Force false so terminal results render.
@@ -1752,6 +1802,7 @@ async function executeToolUseInner(
               deps.sessionRegistry.acquireClaim(deps.sessionId, p, 'exclusive')
             }
           }
+          deps.config.promptEngine.markGitDirty()
         } else {
           deps.taskLedger.record({ type: 'tool_exec', tool: tu.name })
         }
@@ -1949,12 +2000,14 @@ async function executeToolUseInner(
    }
 
     // Prewarm invalidation after writes
-    if ((tu.name === 'write_file' || tu.name === 'edit_file') && !harnessResult.isError && typeof tu.input.file_path === 'string') {
-      try {
-        deps.prewarm.invalidate(validatePath(deps.cwd, tu.input.file_path as string))
-     } catch {
-        deps.prewarm.invalidate(tu.input.file_path as string)
-     }
+    if (WRITE_TOOL_NAMES.has(tu.name) && !harnessResult.isError) {
+      for (const editPath of extractWriteFilePaths(tu.name, tu.input)) {
+        try {
+          deps.prewarm.invalidate(validatePath(deps.cwd, editPath))
+        } catch {
+          deps.prewarm.invalidate(editPath)
+        }
+      }
       // ShadowQueue 投机预读队列失效（P4 解封配套）：队列不像 PrewarmCache
       // 按文件路径索引，没有对应单个 key 的失效方式（grep/glob/list_dir 的
       // target 常是目录，不是被改的那个文件）——整队清空是这个数据结构下
@@ -1982,6 +2035,15 @@ async function executeToolUseInner(
     }
 
     touchActivity(activityKey, `tool:${tu.name}:post:impact`)
+    // evidence 收口：apply_patch / ast_edit 的路径来自 diff 头 / paths 数组，不在下方
+    // 以 file_path 为键的名单里——漏记则 markClaimsStaleForFile 不触发（假新鲜）。
+    if (!harnessResult.isError && (tu.name === 'apply_patch' || tu.name === 'ast_edit')) {
+      for (const changed of extractWriteFilePaths(tu.name, tu.input)) {
+        deps.evidence.trackFileModified(changed)
+        deps.config.contextClaimStore?.markClaimsStaleForFile(changed, `file modified by ${tu.name}`)
+      }
+      deps.config.promptEngine.markGitDirty()
+    }
     // Evidence tracking + import graph
     if (tu.name === 'read_file' && !harnessResult.isError) {
       deps.evidence.trackFileRead(tu.input.file_path as string)

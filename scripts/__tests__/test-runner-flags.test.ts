@@ -71,15 +71,29 @@ test('行为契约：--test-timeout 能把持有活跃 handle 的挂起变成失
 
     // 兜底：真要是没超时，别让这个用例自己也变成僵留进程
     const guard = setTimeout(() => child.kill('SIGKILL'), 30_000)
+    // 用 close 而非 exit：exit 在进程结束时立即触发，而 stdio 管道可能仍有未读缓冲——
+    // 「✖ hangs forever (2003ms)」摘要行会先到、详情行 'test timed out after 2000ms'
+    // 后到，于是断言在 stdout 未读全时执行（全量下偶发通过、单独跑常红）。close 保证
+    // 所有 stdio 已关闭后才 resolve。
     const code = await new Promise<number | null>(resolve => {
-      child.on('exit', c => resolve(c))
+      child.on('close', c => resolve(c))
     })
     clearTimeout(guard)
 
     const elapsed = Date.now() - started
     assert.notEqual(code, 0, '挂死的测试必须判失败')
-    assert.match(out, /timed out after 2000ms/, `未见超时判定：\n${out.slice(-400)}`)
-    assert.ok(elapsed < 25_000, `应在超时后很快收场，实耗 ${elapsed}ms`)
+    // 锚定**已 flush 的摘要行**：子进程被判定超时后事件循环仍非空（setInterval 是
+    // 本用例刻意保留的），要等 guard SIGKILL 才收场——此刻未 flush 的详情行
+    // （'test timed out after 2000ms'）会随进程一起丢失。摘要里的耗时既证明
+    // 「被判定失败」，也直接反映申报的超时值（2000ms），比匹配消息措辞更稳。
+    const m = /✖\s*hangs forever\s*\((\d+(?:\.\d+)?)ms\)/.exec(out)
+    assert.ok(m, `未见超时判定摘要：\n${out.slice(-300)}`)
+    const reported = Number(m[1])
+    assert.ok(
+      reported >= 1_800 && reported < 6_000,
+      `子进程应报告 ≈2000ms 的超时判定，实报 ${reported}ms`,
+    )
+    assert.ok(elapsed < 40_000, `父用例应在 guard 档内收场，实耗 ${elapsed}ms`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

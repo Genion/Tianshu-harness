@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { mcpConfigSchema, type McpConfig } from '../mcp/config.js'
 import { providerRetrySchema } from './retry-schema.js'
+import { imageGenModelSchema } from './image-gen-schema.js'
 
 export type { ProviderRetryConfig } from './retry-schema.js'
 import { THEME_NAMES } from '../tui/theme.js'
@@ -57,10 +58,10 @@ export const providerCapabilitiesSchema = z.object({
 }).default({})
 
 /** Conservative fallback when a model's context window is unknown. */
-export const DEFAULT_MODEL_CONTEXT_WINDOW = 131_072
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 524_288
 /** Conservative output ceiling for models with unknown maxTokens — high enough
  *  for real work, low enough to stay under most endpoints' output caps. */
-export const DEFAULT_MODEL_MAX_TOKENS = 8_192
+export const DEFAULT_MODEL_MAX_TOKENS = 65_536
 
 /**
  * Infer a context window from size suffixes in the model id
@@ -91,6 +92,14 @@ export const modelConfigSchema = z.object({
    *  the norm. Gates the computer_use screenshot → conversation vision channel.
    *  Default undefined = text-only (images are dropped, today's behavior). */
   supportsVision: z.boolean().optional(),
+  /** Model generates images (text-to-image endpoint, issue #8). Declared per
+   *  model, NOT per provider. Consumed by the image-gen slot picker; chat model
+   *  pickers filter these out, and the DashScope native probe keeps them so the
+   *  slot has something to select. Deliberately NOT reusing `supportsVision`:
+   *  that field means "accepts image input" (图→文) — the opposite data-flow
+   *  direction, and overloading it would leak image-gen models into the vision
+   *  auto-bridge candidate pool. Default undefined = not an image generator. */
+  supportsImageGen: z.boolean().optional(),
   /** Pricing per 1M tokens (USD). Optional — used by insights / cost visualization. */
   pricing: z.object({
     input: z.number().min(0).optional(),
@@ -134,6 +143,21 @@ export const authConfigSchema = z.discriminatedUnion('type', [
   }),
 ])
 
+/** 多 key 池的单个 key（PR-3）。每个 key 有自己的模型列表——用哪个 key 由请求
+ *  模型归属决定。三槽与 provider 级同构且互斥语义相同；keyRef 优先
+ *  （config.json 不落明文），secret 键名命名空间见 config/provider-keys.ts。 */
+export const providerKeySchema = z.object({
+  id: z.string(),
+  label: z.string().nullable().optional().transform(value => value ?? undefined),
+  apiKey: z.string().nullable().optional().transform(value => value ?? undefined),
+  apiKeyEnv: z.string().nullable().optional().transform(value => value ?? undefined),
+  keyRef: z.string().nullable().optional().transform(value => value ?? undefined),
+  models: z.array(modelConfigSchema).default([]),
+})
+
+/** 由 providerKeySchema 推出的 key 类型——provider-keys.ts 纯函数模块消费。 */
+export type ProviderKeyConfig = z.infer<typeof providerKeySchema>
+
 export const providerBaseSchema = z.object({
   name: z.string(),
   apiKey: z.string().nullable().optional().transform(value => value ?? undefined),
@@ -159,6 +183,13 @@ export const providerBaseSchema = z.object({
    *  is fetched. Runtime model resolution treats an empty list as "no models
    *  declared" — the provider still works when addressed via probe-filled entries. */
   models: z.array(modelConfigSchema).default([]),
+  /**
+   * 多 key 池（PR-3）：key 是模型归属的父级。已迁移 provider 的顶层三槽与
+   * `models` 保留为旧版兼容视图（keys[0] 镜像，共享同一数组引用），新写入走
+   * 本数组。未迁移的存量配置由 loadConfig 幂等合成 keys[0]——见
+   * config/provider-keys.ts。旧版 rivet 读到本字段时由 z.object 默认 strip。
+   */
+  keys: z.array(providerKeySchema).optional(),
   /** 用户显式保存过的 provider（/connect 落库、provider CLI、手写 config）。
    *  模型切换器只列 userSaved 的 provider——内置默认 fleet 不进列表。 */
   userSaved: z.boolean().optional(),
@@ -426,6 +457,9 @@ export const agentSchema = z.object({
    *  与其他 advisory hook 同档。设 false 或 RIVET_SECURITY_GUIDANCE=0 关闭。
    *  配置项存在的意义是让桌面端用户也能关——GUI 启动的 sidecar 继承不到 shell 环境变量。 */
   securityGuidance: z.boolean().default(true),
+  /** 用户 Stop 时保留 partial 并追加 [interrupted] 标记（对齐 Codex/Claude Code）。
+   *  默认开；false 或 RIVET_INTERRUPT_MARKER=0 关。 */
+  interruptMarker: z.boolean().default(true),
   /** 证据防火墙 Phase 2（jidoka 硬门禁）：deliver_task commit 时引用未经本会话
    *  独立核验的 delegate/scout file:line 断言 → isError 拦截。默认关（opt-in，
    *  Phase 1 诚实标注数据决定是否默认开）。env RIVET_SCOUT_FIREWALL 优先。 */
@@ -523,6 +557,11 @@ export const agentSchema = z.object({
       model: z.string(),
     }).optional(),
   }).optional(),
+  /** 专用文生图模型（issue #8）。注册范式与 `visionModel` 同构——独立 provider
+   *  只经本槽消费，`provider.default` 与 `agent.defaultModel` 全程不动。
+   *  定义主体在 `image-gen-schema.ts`（沿接缝拆分，同 `retry-schema.ts` 先例：
+   *  配置面子面不落在点名巨石上）；未配置时 `generate_image` 不注册（fail-closed）。 */
+  imageGenModel: imageGenModelSchema.optional(),
   /**
    * Opt-in: when `visionModel` is unset and the primary model is text-only, pick
    * the first vision-capable model that has usable credentials and bridge through
@@ -957,6 +996,26 @@ export const configSchema = z.object({
    *  会话启动期解析，会话内冻结（前缀缓存安全）；RIVET_TOOL_PRESET env 优先于此配置。 */
   tools: z.object({
     preset: z.enum(['minimal', 'frontend', 'full', 'taiyi']).optional(),
+    /** Zen Mode（禅模式）：读专注开局，动手即解锁。字段全可选——bootstrap 经
+     *  resolveZenConfig 物化默认并 fail-loud（空 face/重复名等在此层校验）。
+     *  未配置时 enabled 默认 **false**（opt-in）：新会话以全量工具面开局零缓存
+     *  断点；显式 `tools.zen.enabled: true` 开启后以只读面 + zen_unlock 开局，
+     *  首次写动作自动晋升（一次性断点，见 README「禅模式」）。
+     *  strict() 让未知键（如 appendixlean 拼写错误）在加载期抛错而非被 zod
+     *  静默 strip——否则 resolveZenConfig 的未知键检查是死代码。 */
+    zen: z.object({
+      enabled: z.boolean().optional(),
+      face: z.array(z.string()).optional(),
+      /** minimal = 四件套；structuredRead = + file_info/related_tests/
+       *  repo_graph/semantic_search/read_section。显式 face 优先。 */
+      faceMode: z.enum(['minimal', 'structuredRead']).optional(),
+      timeoutSteps: z.number().int().nonnegative().optional(),
+      triage: z.object({
+        enabled: z.boolean().optional(),
+        maxChars: z.number().int().positive().optional(),
+      }).strict().optional(),
+      appendixLean: z.boolean().optional(),
+    }).strict().optional(),
   }).default({}),
   prompt: promptSchema,
   /**
@@ -998,7 +1057,20 @@ export type Config = {
   env: EnvConfig
   ui: UiConfig
   verify: VerifyConfig
-  tools: { preset?: 'minimal' | 'frontend' | 'full' | 'taiyi' | undefined }
+  tools: {
+    preset?: 'minimal' | 'frontend' | 'full' | 'taiyi' | undefined
+    /** Zen Mode（禅模式）原始配置；bootstrap 经 resolveZenConfig 物化后传给 AgentLoop。 */
+    zen?: {
+      enabled?: boolean
+      face?: string[]
+      /** minimal = 四件套；structuredRead = + file_info/related_tests/
+       *  repo_graph/semantic_search/read_section。显式 face 优先。 */
+      faceMode?: 'minimal' | 'structuredRead'
+      timeoutSteps?: number
+      triage?: { enabled?: boolean; maxChars?: number }
+      appendixLean?: boolean
+    } | undefined
+  }
   prompt: PromptConfig
   runtime: RuntimeConfig
   pro: ProConfig

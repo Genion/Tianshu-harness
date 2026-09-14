@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { loadConfig } from '../manager.js'
 import { readSecret } from '../secrets-store.js'
+import { DEFAULT_MODEL_CONTEXT_WINDOW } from '../schema.js'
 import { runProviderCLI, toModelDescriptors } from '../provider-cli.js'
 import { matchModelIds } from '../../api/model-id-matcher.js'
 
@@ -105,7 +106,7 @@ describe('rivet provider CLI', () => {
     const known = provider.models.find(m => m.id === 'deepseek-v4-flash')!
     assert.equal(known.contextWindow, 1_000_000, 'matched model backfills real metadata')
     const unknown = provider.models.find(m => m.id === 'mystery-model-x')!
-    assert.equal(unknown.contextWindow, 131_072, 'unknown model gets the conservative schema default')
+    assert.equal(unknown.contextWindow, DEFAULT_MODEL_CONTEXT_WINDOW, 'unknown model gets the schema fallback window')
     assert.ok(stdout.some(line => line.includes('registered')))
   })
 

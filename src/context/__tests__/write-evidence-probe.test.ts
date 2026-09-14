@@ -151,6 +151,20 @@ describe('write-evidence-probe', () => {
       [],
     )
   })
+
+  // 台账 F7：噪音文件不得进对账——.DS_Store 是**文件**不是目录，原有的目录级
+  // `.` 前缀过滤覆盖不到它（2026-09-14 中断后对账提醒把它列为「可能未完成的工作」）。
+  it('findRecentUnrecordedWrites 排除隐藏噪音文件（.DS_Store 等），真实产物保真', () => {
+    const now = Date.now()
+    writeFileSync(join(tempDir, '.DS_Store'), 'finder-metadata', 'utf-8')
+    writeFileSync(join(tempDir, 'RealProduct.ts'), 'export const y = 2\n', 'utf-8')
+    const recent = findRecentUnrecordedWrites(tempDir, [], { now, sinceMs: now - 60_000 })
+    assert.deepEqual(
+      recent.map(r => r.path),
+      ['RealProduct.ts'],
+      '.DS_Store 等隐藏文件是对账噪音，不得出现在结果里；真实产物必须保留',
+    )
+  })
 })
 
 describe('shouldReconcileDisk — 崩溃后对账的单一判据', () => {

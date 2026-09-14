@@ -1,7 +1,7 @@
 import type { Message, ContentBlock } from '../api/types.js'
 import { normalizeOaiMessages } from '../api/oai-types.js'
 import type { OaiMessage, OaiToolMessage } from '../api/oai-types.js'
-import { groupIntoRounds, computeInvariantStatus, groupIntoRoundsOai } from './rounds.js'
+import { groupIntoRounds, computeInvariantStatus, countRoundsOai } from './rounds.js'
 import type { ResumePreflightReport } from './types.js'
 import {
   extractTargetPath,
@@ -259,7 +259,7 @@ export function runResumePreflightOai(
   if (isToolAdjacencyCleanOai(normalized)) {
     return {
       messageCount: normalized.length,
-      roundCount: groupIntoRoundsOai(normalized).length,
+      roundCount: countRoundsOai(normalized),
       repaired: normalized !== messages,
       syntheticResultsInserted: 0,
       safe: true,
@@ -318,7 +318,7 @@ export function runResumePreflightOai(
 
   return {
     messageCount: messages.length,
-    roundCount: groupIntoRoundsOai(repaired).length,
+    roundCount: countRoundsOai(repaired),
     repaired: true,
     syntheticResultsInserted: inserted,
     safe: true,

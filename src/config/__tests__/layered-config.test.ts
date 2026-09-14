@@ -381,9 +381,11 @@ describe('migrateDeepseekMaxTokens — one-shot bump 64000 → 384000', () => {
             // 与当前预设 models 全集一致——预设新增模型回流（migratePresetModelBackfill）
             // 与退役迁移（migrateDeepseekVisionExpRetirement 等）都会改写快照，那是有意
             // 行为；本测试钉的是「无需迁移时零写入」，故快照必须已同步：既不能缺条目，
-            // 也不能留着已退役的 deepseek-v4-flash-vision-exp。
+            // 也不能留着已退役的 deepseek-v4-flash-vision-exp。2026-09-13 起 v4-pro
+            // 恢复（官方改口径继续服务），快照须含它，否则回流迁移会补写它。
             models: [
               { id: 'deepseek-v4-flash', alias: 'v4-flash', contextWindow: 1_000_000, maxTokens: 384_000 },
+              { id: 'deepseek-v4-pro', alias: 'v4-pro', contextWindow: 1_000_000, maxTokens: 384_000 },
               { id: 'deepseek-flash', alias: 'v4.1-flash', contextWindow: 1_000_000, maxTokens: 384_000 },
             ],
           },

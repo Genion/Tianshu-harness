@@ -18,6 +18,15 @@ describe('normalizeBaseUrl', () => {
     assert.equal(normalizeBaseUrl('https://host.com/embeddings'), 'https://host.com')
   })
 
+  // issue #8：用户注册生图 provider 时，最自然的动作是从 provider 文档复制完整请求
+  // URL（如 SiliconFlow 的 …/v1/images/generations）粘进 base URL 字段。若不剥这个
+  // 尾巴，后续拼接会得到 …/images/generations/models → 404，而报错只说 "path may be
+  // wrong"，用户无法自行定位。
+  it('strips a pasted images/generations tail (image-gen provider onboarding)', () => {
+    assert.equal(normalizeBaseUrl('https://api.siliconflow.com/v1/images/generations'), 'https://api.siliconflow.com/v1')
+    assert.equal(normalizeBaseUrl('https://host.com/images/generations'), 'https://host.com')
+  })
+
   it('leaves clean bases untouched', () => {
     assert.equal(normalizeBaseUrl('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1')
     assert.equal(normalizeBaseUrl('http://localhost:3000/api'), 'http://localhost:3000/api')
@@ -47,6 +56,22 @@ describe('resolveProbeEndpoints', () => {
   it('user pasted a models URL tail: list probe does not hit …/models/models', () => {
     const r = resolveProbeEndpoints('https://host.com/v1/models')
     assert.equal(r.modelsUrl, 'https://host.com/v1/models')
+  })
+
+  // issue #8：生图 onboarding 需要探测 /images/generations，必须复用同一套 base
+  // 归一化——否则粘贴完整生图 URL 的用户会拿到 …/images/generations/models。
+  it('resolves the images endpoint, sharing the same base normalization', () => {
+    assert.equal(
+      resolveProbeEndpoints('https://api.siliconflow.com/v1').imagesUrl,
+      'https://api.siliconflow.com/v1/images/generations',
+    )
+    assert.equal(
+      resolveProbeEndpoints('http://localhost:3000/api').imagesUrl,
+      'http://localhost:3000/api/v1/images/generations',
+    )
+    const pasted = resolveProbeEndpoints('https://api.siliconflow.com/v1/images/generations')
+    assert.equal(pasted.base, 'https://api.siliconflow.com/v1')
+    assert.equal(pasted.imagesUrl, 'https://api.siliconflow.com/v1/images/generations')
   })
 
   it('unknown providers fall back to the OpenAI-compatible default', () => {

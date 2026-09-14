@@ -10,6 +10,7 @@ import { createUserHooksBridge, runOnErrorHooks } from './hooks/user-hooks-bridg
 import { recordSkillInvoked } from './skill-gate.js'
 import { normalizeAntiAnchoringConfig } from './anti-anchoring-config.js'
 import { resolveHookDisabledEnv } from '../config/profile.js'
+import { isInterruptMarkerEnabled } from '../config/interrupt-marker-config.js'
 import { mapQueriedPheromones } from './pheromone-map.js'
 import { setGeneralLedgerTelemetrySink } from './general-ledger.js'
 import { buildPrewarmValue, batchPrewarm } from './prewarm-file.js'
@@ -232,6 +233,22 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
           if (projLen !== undefined && projLen > 0) entry.projChars = projLen
           if (appxLen !== undefined && appxLen > 0) entry.appendixChars = appxLen
 
+          // Appendix composition: appendixChars 只有总量，看不出 zenLean 裁了多少。
+          // 拆成 CVM 计量块与 keep-list 两笔字符账后，「zen 相位 cvmChars 归零」
+          // 可以直接在 cache-log 上判定，不必依赖 telemetry 开关或重跑会话。
+          const anatomy = self.config.promptEngine.getAppendixAnatomy?.()
+          if (anatomy) {
+            // partsChars 与 appendixChars 的差 = 包装开销（<context-update> 标签 +
+            // join 分隔符 + ephemeral 前缀），恒等式 partsChars == cvmChars +
+            // keepChars 供外部脚本自校验。
+            if (anatomy.partsChars > 0) entry.appendixPartsChars = anatomy.partsChars
+            if (anatomy.cvmChars > 0) {
+              entry.appendixCvmChars = anatomy.cvmChars
+              entry.appendixCvmBySource = anatomy.cvmBySource
+            }
+            if (anatomy.keepChars > 0) entry.appendixKeepChars = anatomy.keepChars
+          }
+
           // Read-ref telemetry (Part B): bytes saved by [read-ref] shortcuts.
           const refStats = getReadRefStats()
           if (refStats.count > 0) {
@@ -358,6 +375,12 @@ export function createToolExecutionController(self: AgentLoop): ToolExecutionCon
       getDoomLoopLevel: () => self.getDoomLoopLevel(),
       isGoalActive: () => self.isGoalActive(),
       getPhaseHint: () => self.config.promptEngine.getPhaseHint(),
+      // Zen 解锁点：分派前上报面外工具名——loop 侧判定面外 → 晋升 full + 放行。
+      onZenEscape: name => self.onZenEscape(name),
+      // Zen 解锁声明（zen_unlock 虚拟工具被调用）：直接晋升 full（reason=tool）。
+      onZenUnlock: () => self.promoteZen('tool'),
+      // Zen 相位下未注册工具报错的可行动指引（幻觉调用不晋升）。
+      getZenUnregisteredHint: name => self.getZenUnregisteredHint(name),
       getSessionTurnCount: () => self.session.getTurnCount(),
       getSessionId: () => self.config.sessionId,
       addToolResults: results => { self.session.addToolResults(results) },
@@ -1226,6 +1249,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
       self.turnStepProducer.buildTurnRequest(turn, strategy, sensorium, pressureResult, assistantResponded, userMessageConsumed, callbacks),
     prewarmRecentReads: () => self.prewarmController.prewarmRecentReads(),
     runPostSession: (callbacks) => self.runPostSession(callbacks),
+    drainPersist: () => self.drainPersistWrites(),
+    schedulePostSessionDetached: (callbacks) => { self.schedulePostSessionDetached(callbacks) },
     recordProviderOutcome: (ok) => { self.recordProviderOutcome(ok) },
 
     // === Sub-controllers ===
@@ -1272,6 +1297,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
 
     // === Abort reason (watchdog vs user) ===
     getAbortReason: () => self.abortReason(),
+    // 打断留痕开关（config `agent.interruptMarker` / env `RIVET_INTERRUPT_MARKER` 双通道；默认开）
+    getInterruptMarkerEnabled: () => isInterruptMarkerEnabled(self.config.interruptMarker),
 
     // === Resource sensor ===
     getLatestResourceSnapshot: () => self.latestResourceSnapshot,

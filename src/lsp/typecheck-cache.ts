@@ -381,6 +381,8 @@ export function resolveTypecheckLockRoot(cwd: string): string {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5_000,
+      // Windows：GUI 宿主下不加会闪控制台窗口（架构守卫 spawn-family 检查项）
+      windowsHide: true,
     }).trim()
     return top || cwd
   } catch {

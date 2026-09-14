@@ -98,7 +98,7 @@ Bad: 用 bash explorer/open/start 命令加手写 shell 引号`,
     const command = buildOpenPathCommand(target)
 
     return new Promise((resolveResult) => {
-      const child = spawn(command.cmd, command.args, { detached: true, stdio: 'ignore' })
+      const child = spawn(command.cmd, command.args, { detached: true, stdio: 'ignore', windowsHide: true })
       child.on('error', (err) => {
         resolveResult({ content: `打开 ${target} 时出错：${err.message}`, isError: true })
       })

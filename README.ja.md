@@ -692,6 +692,17 @@ TUI は CLI のデフォルトサーフェスです。デスクトップ版（Ta
 **ファイル編集不要のワンクリック起動**：`/config` → Basics → 「最小セットと星域バインド」——あるドメイン（changgeng や taiyi など）を選択して保存すると、自動で `defaultDomain` にそのドメインを固定＋そのドメインの taiyi 最小ツールセット上書き（lean リソース削減は含まない）。以降 `rivet` の素起動でその星域の最小セットセッションに入れます。「デフォルトモデル」フィールド（`agent.defaultModel`、`provider:modelId` 形式）と組み合わせれば完全にパラメータなしで起動可能。バインドをクリアすればデフォルトドメインに復帰（ドメイン上書き設定は保持）。デスクトップ版も同じ項目：設定 → システム → 「最小セットと星域バインド」。
 
 
+### 🎨 画像生成（テキストから画像）
+
+OpenAI 形式のテキスト→画像エンドポイント（SiliconFlow / OpenAI Images など）を登録すると、`generate_image` ツールで画像を生成できます。
+
+- **専用スロット `agent.imageGenModel`**——`provider.default` と `agent.defaultModel` は**一切変わりません**（プレフィックスキャッシュのアンカーを維持）。未設定のうちはツールがツール一覧に入らないため、使わない方への影響はゼロです。
+- **パスのみ返し、バイトは返さない**：画像はディスクに保存し、会話にはローカルパスだけを返します。**base64 はコンテキストに入りません**（エラー文言にも入りません）。
+- **デスクトップ**：設定 → 画像生成モデル——エンドポイント登録、**実際に出図する接続テスト**（生成クレジットを 1 回消費します）、登録済みモデルのドロップダウン選択。**登録後は現在のセッションに即時反映**されます。
+- サイズのフィールド名は設定可能（OpenAI は `size`、SiliconFlow は `image_size`）。一般的なレスポンス形状は自動判別されます。ComfyUI ネイティブ API は未対応です（OpenAI 互換ブリッジが必要）。
+
+登録方法とパラメータの詳細は [モデル設定](#-モデル設定) の「画像生成」を参照してください。
+
 ## ⚙️ モデル設定
 
 ### マルチプロバイダー＋適応的ルーティング
@@ -740,6 +751,13 @@ config.json を直接編集することも可能（上書きしたいフィー�
 - メイン制御モデルが `supportsVision` を宣言していれば直接画像を見る。そうでなければ `agent.visionModel` 識图ブリッジを設定し、まずビジュアルモデルでテキスト化してからメイン制御に渡す。
 - 内蔵ビジュアルモデルとブリッジ設定、`/vision` 発見ウィザード、`ask_image` フォローアップ、デスクトップ/TUI の設定入口は [画像認識能力ユーザーマニュアル](docs/user-guide-vision.md) を参照。
 - 画像は会話末尾に追加され、**プレフィックスキャッシュを壊しません**。サポート外の画像は明示的に警告され、黙って破棄されることはありません。
+
+### 画像生成（テキストから画像）
+
+- 専用スロット `agent.imageGenModel`（デスクトップ：「設定 → 画像生成モデル」）：OpenAI 形式のテキスト→画像エンドポイント（SiliconFlow / OpenAI Images など）を登録すると、`generate_image` ツールで画像を生成できます。
+- **作業モデルと `provider.default` は一切変わりません**——画像プロバイダは独立して登録され、未設定のうちはツールがツール一覧に入らないため、プレフィックスキャッシュへの影響はゼロです。
+- サイズのフィールド名は設定可能（OpenAI は `size`、SiliconFlow は `image_size`）。一般的なレスポンス形状は自動判別されます。成果物は**ローカルファイルパスのみを返し、base64 はコンテキストに入りません**。
+- ComfyUI のネイティブ API は対象外です（「workflow 投入 → history ポーリング → `/view` 取得」の 3 段階）。まず OpenAI 互換のブリッジプラグインをローカルに入れてください。
 
 ### Worker ルーティング（サブエージェントに別モデル）
 
@@ -1069,6 +1087,12 @@ rivet logs open desktop            # sidecar ログディレクトリを開く�
       "model": "MiniMax-M3"
     },
     "visionAutoBridge": false,    // visionModel 未設定時に利用可能なビジュアルモデルを自動選択（デフォルトオフ）
+    "imageGenModel": {            // 画像生成スロット：エンドポイント登録後、generate_image で画像を生成
+      "provider": "siliconflow-image",  // 独立登録のプロバイダ——provider.default は変わりません
+      "model": "black-forest-labs/FLUX.2-pro",
+      "size": "1024x1024",        // 既定サイズ（任意）
+      "sizeField": "image_size"   // OpenAI は size、SiliconFlow は image_size（任意）
+    },
     "permissions": {              // 権限ルール（/permission コマンドに対応）
       "allow": [{ "tool": "read" }],
       "deny":  [{ "tool": "bash", "params": { "command": "rm -rf" } }],

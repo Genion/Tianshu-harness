@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { constants, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { nodeTestFlags, resolveTestTimeoutMs } from './test-runner-flags.js'
-import { runGuardedChild } from './test-child-guard.js'
+import { runGuardedChild, DEFAULT_IDLE_MS } from './test-child-guard.js'
 
 const args = process.argv.slice(2)
 const includeTui = !args.includes('--exclude-tui')
@@ -130,6 +130,8 @@ interface BatchOutcome {
   fail: number
   /** 是否见到 node 的汇总段。false = 跑了但什么都没验证。 */
   complete: boolean
+  /** 失败批末帧（含 `failing tests:` 明细）——0 fail 时为空，汇总后重放。 */
+  failureExcerpt: string
 }
 
 /**
@@ -145,6 +147,16 @@ async function runBatch(batch: string[]): Promise<BatchOutcome> {
   }
   if (!res.summarySeen) {
     console.error('⚠️  本批未打印汇总段（ℹ tests）——按 fail-closed 判失败：没有汇总等于没有验证。')
+    console.error(
+      `    本批 ${batch.length} 个测试文件；已见进度（下界，未计入合计）：✔ ${res.seenChecks.pass} / ✖ ${res.seenChecks.fail}`,
+    )
+    if (res.tailExcerpt) {
+      console.error('    末帧片段（用于定位卡在哪）：')
+      for (const line of res.tailExcerpt.split('\n')) console.error(`      ${line}`)
+    }
+    if (res.killed === 'idle') {
+      console.error(`    收场方式：闲置 ${DEFAULT_IDLE_MS / 1000}s 无输出被看门狗杀掉（真挂死，非「跑完不退」）。`)
+    }
   }
   return {
     code: res.code,
@@ -152,6 +164,7 @@ async function runBatch(batch: string[]): Promise<BatchOutcome> {
     pass: res.pass ?? 0,
     fail: res.fail ?? 0,
     complete: res.summarySeen,
+    failureExcerpt: res.failureExcerpt,
   }
 }
 
@@ -164,16 +177,52 @@ let worstExit = 0
 let totalTests = 0
 let totalPass = 0
 let totalFail = 0
-for (const batch of batches) {
+let incompleteBatches = 0
+const failureExcerpts: Array<{ batchNo: number; fileCount: number; excerpt: string }> = []
+for (const [batchIdx, batch] of batches.entries()) {
   if (shuttingDown) break
   const out = await runBatch(batch)
   totalTests += out.tests
   totalPass += out.pass
   totalFail += out.fail
+  if (!out.complete) incompleteBatches++
   if (out.code !== 0) worstExit = out.code
+  if (out.failureExcerpt) {
+    failureExcerpts.push({ batchNo: batchIdx + 1, fileCount: batch.length, excerpt: out.failureExcerpt })
+  }
 }
 if (batches.length > 1) {
   // 分批时各批各自打印汇总，这里再给一行跨批合计——否则总数得靠人肉加。
-  console.error(`合计：${totalTests} 条（pass ${totalPass} / fail ${totalFail}）· ${batches.length} 批`)
+  // 被看门狗收场的批没有汇总，其 tests/pass/fail 记为 0：合计此时是**下界**，
+  // 必须标注出来，否则「合计 N 条」会被误读成全量数字。
+  const caveat =
+    incompleteBatches > 0
+      ? ` · ⚠️ ${incompleteBatches}/${batches.length} 批未出汇总（真挂死被看门狗收场），合计仅覆盖已完成批、实际跑了更多`
+      : ''
+  // 与转发的批次输出同流（stdout）：stderr 会先于 stdout 的缓冲落盘，导致「合计/
+  // 明细逻辑上在最后、tail 却看不到」（台账 F5 的物理成因）；退出前的排空保证不丢。
+  console.log(`合计：${totalTests} 条（pass ${totalPass} / fail ${totalFail}）· ${batches.length} 批${caveat}`)
 }
-process.exit(interruptSignal !== null ? 128 + (constants.signals[interruptSignal] ?? 15) : worstExit)
+if (failureExcerpts.length > 0) {
+  // 失败明细重放（台账 F5）：在输出尾部给出失败批末帧（含 `failing tests:` 段），
+  // 让「只 tail 看结尾」的用法也能直接定位失败用例，不必重跑整批再重定向。
+  // 同流 stdout（顺序与主输出一致）；完整原始输出仍在各批的原始流里。
+  console.log('失败批末帧（含 ✖ 用例；各批完整原始输出见上方）：')
+  for (const { batchNo, fileCount, excerpt } of failureExcerpts) {
+    console.log(`── 批 ${batchNo}/${batches.length}（${fileCount} 个测试文件）──`)
+    for (const line of excerpt.split('\n')) console.log(`  ${line}`)
+  }
+}
+const exitCode = interruptSignal !== null ? 128 + (constants.signals[interruptSignal] ?? 15) : worstExit
+// process.exit() 不等异步 stdio 排空：stdout 被管道/文件重定向时是全缓冲——主输出
+// （转发的批次流）可能丢尾、或与 stderr（无缓冲、先落盘）交错错位，表现为「失败
+// 明细/合计逻辑上在最后、tail 却看不到」（台账 F5 的物理成因）。退出前显式等两流
+// 排空；1.5s 兜底防异常流卡死（宁可错位也不挂住）。
+await Promise.race([
+  Promise.all([
+    new Promise<void>((resolve) => process.stdout.write('', () => resolve())),
+    new Promise<void>((resolve) => process.stderr.write('', () => resolve())),
+  ]),
+  new Promise<void>((resolve) => setTimeout(resolve, 1_500).unref()),
+]).catch(() => { /* 流已关闭等异常场景——不阻塞退出 */ })
+process.exit(exitCode)

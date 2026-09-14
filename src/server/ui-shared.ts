@@ -63,6 +63,15 @@ export {
 // 证据摘要（CompletionCurtain / event-reducer 消费的 SSE 载荷类型）
 export type { EvidenceSummary, DeliveryVerificationStatus } from '../agent/evidence-types.js'
 
+// 回放出口的 delta run 合并（零依赖叶子，只 `import type` protocol）。桌面端
+// 生产代码不消费它——服务端在 /stream、/events 出口已经合并完；暴露在共享面
+// 是给 event-reducer 的等价性测试用（合并回放 fold ≡ 逐条 fold），让那条
+// 契约与服务端实现绑定在同一份源码上，而不是各自复制一份合并规则。
+export {
+  compactReplayRuns,
+  type CompactReplayOptions,
+} from './replay-compaction.js'
+
 // 对外权限词表（TUI / 桌面 / 插件同一套监督·自动·全自动）
 export {
   PERMISSION_TIERS,

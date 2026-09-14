@@ -563,6 +563,16 @@ rivet config mcp list                                              # 列出 + �
 
 会话内：`/mcp`（状态）、`/debug mcp`（诊断）。MCP 工具与内置工具遵循同一审批模式。
 
+#### 生态示例：tianshu-mcp（外部 AI-Agent 编排）
+
+[tianshu-mcp](https://github.com/lanlan0811/tianshu-mcp) 是面向天枢的编排型 MCP server——天枢做总指挥，经它把「项目开发 → 验收 → 失败返修 → 再验收」闭环派给外部 AI-Agent（Codex / ZCode / TraeWork）执行：
+
+```bash
+rivet config mcp add-stdio tianshu-mcp npx -y tianshu-mcp
+```
+
+接入后会话内出现 `mcp__tianshu-mcp__run_task` 等 9 个工具：`run_task(projectPath=..., agentId=..., task="任务书", autoVerify=true)` 秒回 taskId，`query_task` 轮询终态与验收报告。GUI 驱动目前仅 Windows 完成真机验证；macOS 可用无头 `codex exec` 路径（`driver=spawn` 用户 profile，复用 `~/.codex` 登录态），配置示例见该仓库 README。
+
 ### 终端 UI（TUI）
 
 天枢的命令行界面跑在自研的 **T9 渲染引擎**上——纯 ANSI、零 React/Ink 依赖、纯 TypeScript 实现（`src/tui/engine/`）。除了一般的对话与工具调用展示，TUI 还内置一组面向编码场景的交互能力：
@@ -712,6 +722,17 @@ TUI 是 CLI 的默认表面。桌面端（Tauri）与 VS Code/Cursor 插件共�
 **无需改文件的一键启动**：`/config` → Basics → 「最小集绑定星域」——选中某域（如 changgeng 或 taiyi），保存即自动写入 `defaultDomain` 钉定该域 + 该域的 taiyi 最小工具档覆盖（不含 lean 资源减配）。此后 `rivet` 裸启动即进入该星域的最小集会话；配合「默认模型」字段（`agent.defaultModel`，`provider:modelId` 格式）即可完全免参数启动。清空绑定则恢复默认域（域覆盖配置保留）。桌面端同款项：设置 → 系统 → 「最小集绑定星域」。
 
 
+### 🎨 生图（文生图）
+
+注册一个 OpenAI 形态的文生图端点（SiliconFlow / OpenAI Images 等），agent 即可用 `generate_image` 工具出图。
+
+- **独立用途槽 `agent.imageGenModel`**——`provider.default` 与 `agent.defaultModel` **完全不动**，前缀缓存锚定不受影响。未配置时工具根本不进工具表，对不启用该功能的用户零影响。
+- **只回路径、不回字节**：图片落盘后只把本地文件路径写回对话，**base64 绝不进上下文**（返回类型里就没有 base64 字符串），也绝不进错误文案。
+- **桌面端**：设置 → 生图模型——端点注册、**真实出图真测**（会消耗一次生成额度）、已注册生图模型的下拉快选。**注册后当前会话即时生效**，不必新开会话。
+- 尺寸字段名可配（OpenAI 发 `size`、SiliconFlow 发 `image_size`），常见响应形状自动适配；ComfyUI 原生 API 暂不支持（它是「提交 workflow → 轮询 history → 取 `/view`」三步链路，需先在本机装 OpenAI 兼容桥接插件）。
+
+注册方式、发图参数与协议细节见下方 [模型配置](#-模型配置) 的「生图（文生图）」。
+
 ## ⚙️ 模型配置
 
 ### 多提供商 + 自适应路由
@@ -760,6 +781,13 @@ rivet config show                     # 查看完整配置
 - 主控模型声明 `supportsVision` 时直接看图；否则可配 `agent.visionModel` 识图桥，先用视觉模型转文字再交给主控。
 - 内置视觉模型与桥接配置、`/vision` 发现向导、`ask_image` 追问、桌面端/TUI 设置入口详见 [识图能力用户手册](docs/user-guide-vision.md)。
 - 图片走对话尾部追加，**不打断前缀缓存**；不支持的图片会明确警告，不会静默丢弃。
+
+### 生图（文生图）
+
+- 独立用途槽 `agent.imageGenModel`（桌面端「设置 → 生图模型」）：注册一个 OpenAI 形态的文生图端点（SiliconFlow / OpenAI Images 等），agent 即可用 `generate_image` 工具出图。
+- **干活模型与 `provider.default` 完全不动**——生图 provider 是独立注册的；未配置时工具根本不进工具表，对前缀缓存零影响。
+- 尺寸字段名可配（OpenAI 发 `size`、SiliconFlow 发 `image_size`），常见响应形状自动适配；产物**只回本地文件路径，base64 不进上下文**。
+- ComfyUI 原生 API 不在支持范围（它是「提交 workflow → 轮询 history → 另取 `/view`」的三步链路），需先在本机装 OpenAI 兼容桥接插件。
 
 ### Worker 路由（子智能体用不同模型）
 
@@ -1092,6 +1120,12 @@ rivet logs open desktop            # 打开 sidecar 日志目录（GUI 起不来
       "model": "MiniMax-M3"
     },
     "visionAutoBridge": false,    // 未配 visionModel 时自动挑一个可用视觉模型（默认关）
+    "imageGenModel": {            // 生图槽：注册文生图端点后，agent 可用 generate_image 出图
+      "provider": "siliconflow-image",  // 独立注册的 provider，不影响 provider.default
+      "model": "black-forest-labs/FLUX.2-pro",
+      "size": "1024x1024",        // 默认尺寸（可选）
+      "sizeField": "image_size"   // OpenAI 发 size，SiliconFlow 发 image_size（可选）
+    },
     "permissions": {              // 权限规则（对应 /permission 命令）
       "allow": [{ "tool": "read" }],
       "deny":  [{ "tool": "bash", "params": { "command": "rm -rf" } }],

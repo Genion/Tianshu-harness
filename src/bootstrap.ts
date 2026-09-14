@@ -29,12 +29,13 @@ import { isProFeatureEnabled } from './config/pro-license.js'
 import { lastSessionPointerDir, rivetHome, stateDir } from './config/paths.js'
 import { setTargetConventions, applyConfiguredGitBashPath } from './platform.js'
 import { AgentLoop } from './agent/loop.js'
+import { resolveZenConfig } from './agent/zen-mode.js'
 import { createAgentConfig, createMainAgentConfigInput } from './agent/create-agent-config.js'
 import { SessionContext } from './agent/context.js'
 import { SessionPersist, evictOldSessions, getSessionDir } from './agent/session-persist.js'
 import { runGateCompletion } from './agent/gate-completion.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from './memory/backfill.js'
-import { migrateSessionFiles } from './agent/session-cd.js'
+import { migrateSessionFiles, rebuildStoresAfterCwdMove } from './agent/session-cd.js'
 import { decideStartupSession, RESUME_FRESHNESS_MS } from './agent/session-recovery.js'
 import { runResumePreflightOai } from './context/resume-preflight.js'
 import {
@@ -472,6 +473,10 @@ export function createInteractiveToolRegistry(
   // 域工具档位：defaultDomain 钉定某域且该域配置了 toolPreset 时按域装配
   // （如 taiyi 域默认 taiyi 档）。运行期 /domain 切换不改（装配已过）。
   const toolPreset = resolveToolPreset(cwd, config.agent.defaultDomain)
+  // zen structuredRead 读面：zen 显式启用（enabled===true）且配 faceMode 时，
+  // 面内结构化读工具不受 preset 排除（enabled 前置——默认关后配
+  // {enabled:false, faceMode} 或只配 faceMode 都不该越档注册）。
+  const zenStructuredRead = config.tools?.zen?.enabled === true && config.tools?.zen?.faceMode === 'structuredRead'
   const reg = createDefaultToolRegistry([], {
     preset: toolPreset,
     desktopTools: config.agent.desktopTools,
@@ -668,17 +673,18 @@ export function createInteractiveToolRegistry(
     reg.register(BROWSER_DEBUG_TOOL)
   }
 
-  // repo_graph — meridian 图查询。preset full 含；RIVET_REPO_GRAPH=1 强制开启。
-  if (presetIncludes(toolPreset, 'repo_graph') || process.env.RIVET_REPO_GRAPH === '1') {
+  // repo_graph — meridian 图查询。preset full 含；RIVET_REPO_GRAPH=1 强制开启；
+  // zen structuredRead 读面豁免（面内工具必须在注册表里，否则读面名存实亡）。
+  if (presetIncludes(toolPreset, 'repo_graph') || process.env.RIVET_REPO_GRAPH === '1' || zenStructuredRead) {
     reg.register(createRepoGraphTool(() => refs.meridianIndexer))
   }
 
   // related_tests — override the no-indexer default with a meridian-aware factory
-  if (presetIncludes(toolPreset, 'related_tests')) {
+  if (presetIncludes(toolPreset, 'related_tests') || zenStructuredRead) {
     reg.register(createRelatedTestsTool(() => refs.meridianIndexer))
   }
 
-  if (presetIncludes(toolPreset, 'semantic_search')) reg.register(SEMANTIC_SEARCH_TOOL)
+  if (presetIncludes(toolPreset, 'semantic_search') || zenStructuredRead) reg.register(SEMANTIC_SEARCH_TOOL)
   // APPLY_PATCH: EXTENDED layer — overlap with hash_edit covers >90% of
   // use cases; kept here (interactive) for edge cases (e.g. git-format patches).
   // taiyi 排除（16 核心集已有 edit_file/hash_edit 覆盖编辑面）。
@@ -1021,10 +1027,18 @@ export function createAgentRuntime(deps: {
     totalShadowSamples: g.evidence.totalShadowSamples,
   }))
 
+  // Zen Mode 配置解析接线：config.tools.zen（schema 已声明 zen 键——zod 校验
+  // 结构错误在加载期 fail-loud，不再 strip 静默吞没）。未配置 → resolveZenConfig
+  // (undefined) = 默认关闭（opt-in：新会话全量工具面开局，零缓存断点）；开启方式：
+  // tools.zen.enabled = true（新会话生效——读面四件套 + 8 turn 预算 + 短消息
+  // 分诊 + appendix 收敛，见 README「禅模式」）。
+  const zenConfig = resolveZenConfig((config.tools as { zen?: unknown }).zen)
+
   const agent = new AgentLoop(
     {
       ...agentCfg,
       toolRegistry,
+      zen: zenConfig,
       // P2: CVM 管线装配配置——磁盘 Config.hooks 填入 AgentLoop 选项
       // （createRuntimeHooksPipeline 经 resolveDisabledHookIds 消费；
       // 交互模式热更见 config-watcher）。
@@ -1312,6 +1326,10 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
           )
         }
         ctx.agent.flushStigmergySync()
+        // agent-16：claim-store 的 write-behind 队列（纯内存 pendingLines）与
+        // stigmergy 同理——会话末撞上短暂文件锁时滞留行随进程退出丢失；显式
+        // 排空（有界超时，best-effort）。
+        try { await ctx.claimStore.flushWrites(2_000) } catch { /* best-effort */ }
         ctx.agent.abort()
       } catch (err) {
         try { process.stderr.write(`[shutdown] callback error: ${(err as Error)?.message}\n`) } catch { /* noop */ }
@@ -1439,6 +1457,8 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     const oldCoordinator = ctx.refs.coordinator
     // 旧 agent 的 fs.watch 句柄随丢弃释放（三条 switch 路径统一纪律）。
     try { ctx.agent.stopFsWatcher() } catch { /* best-effort */ }
+    // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
+    try { ctx.agent.stopConfigWatcher() } catch { /* best-effort */ }
 
     const { agent } = createAgentRuntime({
       provider,
@@ -1628,6 +1648,8 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
   try { ctx.agent.stigmergyStore.flushSync() } catch { /* best-effort */ }
   // 旧 agent 的 fs.watch 句柄随丢弃释放（三条 switch 路径统一纪律）。
   try { ctx.agent.stopFsWatcher() } catch { /* best-effort */ }
+  // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
+  try { ctx.agent.stopConfigWatcher() } catch { /* best-effort */ }
 
   const oldId = ctx.sessionId
   // Wave K (P0 同源修复): 与 switchAgentRuntime 同源——createAgentRuntime 会
@@ -1819,6 +1841,12 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   const oldEngine = ctx.agent.config.promptEngine
   const oldCoordinator = ctx.refs.coordinator
   const newPersist = new SessionPersist(sessionId, newCwd)
+  // D-1：fileHistory/claimStore 的磁盘根都焊死构造期 cwd（备份根 persist.getBackupDir()、
+  // claims 根 getSessionDir(cwd)），原引用直接复用会让 undo 读旧路径备份 ENOENT 被
+  // 当「missing」静默跳过（撤销无声丢失）、新编辑在旧项目路径复活旧会话目录（脑裂），
+  // 旧目录搬不空更让回程 /cd rename ENOTEMPTY 确定性砖化。会话文件已整体迁到新 slug
+  // 目录（第 4 步），容器按 newPersist 重建即无缝接管。
+  const rebuiltStores = rebuildStoresAfterCwdMove(ctx.fileHistory, newPersist)
 
   const { agent } = createAgentRuntime({
     provider: ctx.provider,
@@ -1829,8 +1857,8 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
     cwd: newCwd,
     toolRegistry: ctx.toolRegistry,
     persist: newPersist,
-    claimStore: ctx.claimStore,
-    fileHistory: ctx.fileHistory,
+    claimStore: rebuiltStores.claimStore,
+    fileHistory: rebuiltStores.fileHistory,
     refs: ctx.refs,
     domainKnowledgeStore: ctx.domainKnowledgeStore,
     modelId: currentModelId,
@@ -1843,6 +1871,8 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   const oldLspManager = ctx.refs.lspManager
   ctx.agent = agent
   ctx.persist = newPersist
+  ctx.fileHistory = rebuiltStores.fileHistory
+  ctx.claimStore = rebuiltStores.claimStore
   ctx.cwd = newCwd
   ctx.refs.promptEngine = agent.config.promptEngine
   wireFrozenSnapshotPersist(newPersist, agent.config.promptEngine)
@@ -1857,6 +1887,8 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   }
   // 旧 agent 的 fs.watch 句柄随丢弃释放（/model、/resume 同款统一纪律）。
   try { oldAgent.stopFsWatcher() } catch { /* best-effort */ }
+  // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
+  try { oldAgent.stopConfigWatcher() } catch { /* best-effort */ }
 
   // 7. 会话归属账本：meta.cwd（跨 cwd resume 守卫读它）+ pointer + registry。
   try { newPersist.updateMetadata({ cwd: newCwd }) } catch { /* best-effort */ }

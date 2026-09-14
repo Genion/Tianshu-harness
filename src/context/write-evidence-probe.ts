@@ -190,6 +190,10 @@ export function findRecentUnrecordedWrites(
         continue
       }
       if (!entry.isFile()) continue
+      // 隐藏文件（.DS_Store / 编辑器临时文件）不是工作产物——台账 F7：它们是
+      // **文件**不是目录，下面目录级的 `.` 前缀过滤覆盖不到，曾把 .DS_Store
+      // 列进中断后的对账提醒（「可能属于中断前已完成的工作」）。
+      if (entry.name.startsWith('.')) continue
       visited++
       if (mentioned.has(full)) continue
       try {

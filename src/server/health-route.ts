@@ -13,6 +13,53 @@ import type { LoopLagSnapshot } from './loop-health.js'
 import { isAuthorizedRequest } from './auth.js'
 import { PROTOCOL_VERSION } from './protocol.js'
 
+/** 带 token 请求拿到的全量 health 体。`GET /events` 的心跳复用同一份（阶段 4）。 */
+export interface HealthBody {
+  ok: boolean
+  version: string
+  protocolVersion: number
+  uptimeMs: number
+  sessionCount: number
+  runningCount: number
+  registryOk: boolean
+  configured: boolean
+  loopLagP99Ms?: number
+  loopLagMaxMs?: number
+}
+
+export type HealthSnapshot = () => HealthBody
+
+/**
+ * 全量 health 体的单一构造点。`buildHealthRoute` 与 `GET /events` 的 5s 心跳
+ * 共用，保证推送通道上的 health 与 REST 逐字段一致（前端直接 setQueryData）。
+ */
+export function createHealthSnapshot(
+  manager: RuntimeSessionManager,
+  startedAt: number,
+  version: string,
+  registryReady?: () => boolean,
+  configured?: () => boolean,
+  loopLag?: () => LoopLagSnapshot,
+): HealthSnapshot {
+  return () => {
+    const registryOk = registryReady ? registryReady() : true
+    const configuredOk = configured?.() ?? true
+    const { sessionCount, runningCount } = manager.stats()
+    const lag = loopLag?.()
+    return {
+      ok: registryOk && configuredOk,
+      version,
+      protocolVersion: PROTOCOL_VERSION,
+      uptimeMs: Date.now() - startedAt,
+      sessionCount,
+      runningCount,
+      registryOk,
+      configured: configuredOk,
+      ...(lag ? { loopLagP99Ms: lag.p99Ms, loopLagMaxMs: lag.maxMs } : {}),
+    }
+  }
+}
+
 export function buildHealthRoute(
   manager: RuntimeSessionManager,
   startedAt: number,
@@ -22,32 +69,18 @@ export function buildHealthRoute(
   configured?: () => boolean,
   loopLag?: () => LoopLagSnapshot,
 ): Record<string, RouteHandler> {
+  const snapshot = createHealthSnapshot(manager, startedAt, version, registryReady, configured, loopLag)
   return {
     'GET /health': (_body, _params, headers) => {
-      const registryOk = registryReady ? registryReady() : true
-      const configuredOk = configured?.() ?? true
       if (!isAuthorizedRequest({ headers: headers ?? {} }, apiToken)) {
+        const registryOk = registryReady ? registryReady() : true
+        const configuredOk = configured?.() ?? true
         return {
           status: 200,
           body: { ok: registryOk && configuredOk, version },
         }
       }
-      const { sessionCount, runningCount } = manager.stats()
-      const lag = loopLag?.()
-      return {
-        status: 200,
-        body: {
-          ok: registryOk && configuredOk,
-          version,
-          protocolVersion: PROTOCOL_VERSION,
-          uptimeMs: Date.now() - startedAt,
-          sessionCount,
-          runningCount,
-          registryOk,
-          configured: configuredOk,
-          ...(lag ? { loopLagP99Ms: lag.p99Ms, loopLagMaxMs: lag.maxMs } : {}),
-        },
-      }
+      return { status: 200, body: snapshot() }
     },
   }
 }

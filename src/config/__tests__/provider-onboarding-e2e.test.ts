@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { loadConfig } from '../manager.js'
 import { runProviderCLI } from '../provider-cli.js'
 import { OpenAIClient } from '../../api/openai-client.js'
+import { DEFAULT_MODEL_CONTEXT_WINDOW } from '../schema.js'
 
 function sse(chunks: string[]): string {
   return chunks.map(c => `data: ${c}\n\n`).join('') + 'data: [DONE]\n\n'
@@ -93,7 +94,7 @@ describe('provider onboarding end-to-end (mock OpenAI-compatible server)', () =>
     assert.equal(known.contextWindow, 1_000_000)
     // Unknown model: schema default, not a silently wrong value.
     const unknown = provider.models.find(m => m.id === 'brand-new-model-x')!
-    assert.equal(unknown.contextWindow, 131_072)
+    assert.equal(unknown.contextWindow, DEFAULT_MODEL_CONTEXT_WINDOW)
     assert.ok(errOut.some(l => l.includes('[TODO]')), 'unknown model annotated as TODO')
 
     // 2. models — pasteable snippet lists both models.

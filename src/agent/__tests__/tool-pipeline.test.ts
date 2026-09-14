@@ -5,7 +5,9 @@ import { execFileSync } from 'node:child_process'
 import { join, resolve as resolvePath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { executeToolUse, patchTargetPaths, type ToolPipelineDeps } from '../tool-pipeline.js'
+import { FileHistory } from '../file-history.js'
 import { createTurnBudget } from '../turn-budget.js'
+import { createCheckpoint, getRollbackPreview } from '../checkpoint.js'
 import { fingerprintToolCall } from '../trace-store.js'
 import { createPermissionOverlay } from '../permissions.js'
 import type { EvidenceTrackerPublic } from '../evidence.js'
@@ -1223,6 +1225,67 @@ describe('executeToolUse', () => {
     assert.deepEqual(released, ['src/a.ts'], 'the staked a.ts claim must go back when the patch is refused')
     assert.equal(executed, false, 'harness must NOT execute the contested patch')
     assert.equal((result.toolResult as any).is_error, true)
+  })
+
+  it('E6: checkpoint creation failure appends a rollback warning and does NOT latch checkpointCreated', async () => {
+    let checkpointCalls = 0
+    const deps = makeDeps({
+      createCheckpoint: async () => { checkpointCalls++; return null },
+    })
+
+    const result = await executeToolUse(
+      { id: 'tu-cp-fail', name: 'write_file', input: { file_path: 'foo.ts', content: 'x' } },
+      deps, noopCallbacks as any, 1, false,
+    )
+
+    assert.equal(checkpointCalls, 1, 'first mutating tool of the turn must attempt the baseline')
+    assert.equal(result.checkpointCreated, false, 'failure must NOT latch the flag — the next tool/turn must retry the baseline')
+    const content = (result.toolResult as any).content as string
+    assert.match(content, /\[checkpoint\] 回滚基线创建失败/, 'result must carry the rollback-window warning')
+    assert.match(content, /自动回滚不可用/, 'warning must state the rollback is unavailable this turn')
+  })
+
+  it('E6: after a failed baseline the next mutating tool retries the checkpoint (window not silently lost)', async () => {
+    let fail = true
+    const deps = makeDeps({
+      createCheckpoint: async () => (fail ? null : { hash: 'deadbeef', timestamp: 1, message: 'auto' }),
+    })
+
+    const first = await executeToolUse(
+      { id: 'tu-cp-retry-1', name: 'write_file', input: { file_path: 'a.ts', content: 'x' } },
+      deps, noopCallbacks as any, 1, false,
+    )
+    assert.equal(first.checkpointCreated, false)
+
+    fail = false
+    const second = await executeToolUse(
+      { id: 'tu-cp-retry-2', name: 'write_file', input: { file_path: 'b.ts', content: 'x' } },
+      deps, noopCallbacks as any, 1, first.checkpointCreated,
+    )
+    assert.equal(second.checkpointCreated, true, 'retry on the next mutating tool must succeed and latch')
+    assert.doesNotMatch((second.toolResult as any).content as string, /回滚基线创建失败/, 'recovered path must not warn')
+  })
+
+  it('E6: successful checkpoint latches, fires onCheckpoint, and appends no warning', async () => {
+    let checkpointCalls = 0
+    let onCheckpointHash = ''
+    const callbacks = {
+      ...noopCallbacks,
+      onCheckpoint: (hash: string) => { onCheckpointHash = hash },
+    }
+    const deps = makeDeps({
+      createCheckpoint: async () => { checkpointCalls++; return { hash: 'deadbeef', timestamp: 1, message: 'auto' } },
+    })
+
+    const result = await executeToolUse(
+      { id: 'tu-cp-ok', name: 'write_file', input: { file_path: 'foo.ts', content: 'x' } },
+      deps, callbacks as any, 1, false,
+    )
+
+    assert.equal(checkpointCalls, 1)
+    assert.equal(result.checkpointCreated, true, 'success must latch the flag (no re-checkpoint per tool)')
+    assert.equal(onCheckpointHash, 'deadbeef', 'success must surface the baseline hash via onCheckpoint')
+    assert.doesNotMatch((result.toolResult as any).content as string, /\[checkpoint\]/, 'success path must stay warning-free')
   })
 
   it('executes a tool and returns result', async () => {
@@ -3602,5 +3665,353 @@ describe('TDD gate suggest annotation', () => {
     )
     assert.equal((result.toolResult as any).is_error ?? false, false)
     assert.equal(seen.length, 0, '空库时不得查询 meridian（analyzeImpact 各方法都不该被调）')
+  })
+})
+
+// ── E4 写工具记账与 LSP 通知收口（hash_edit / ast_edit / apply_patch）──────
+// 病灶：trackEdit 门槛、边界回溯名单、LSP changeFile 通知三处只认
+// write_file/edit_file。修复后以 WRITE_TOOL_NAMES + extractWriteFilePaths
+// （write-tool-helpers，单一事实源）接通五件写工具。
+describe('E4 写工具记账与 LSP 通知收口', () => {
+  const noopCb = { onToolResult: () => {}, onApprovalRequired: async () => true }
+
+  function makeDeps(cwd: string, overrides?: Partial<ToolPipelineDeps>): ToolPipelineDeps {
+    return {
+      config: {
+        toolRegistry: {
+          execute: async () => ({ content: 'ok', isError: false }),
+          get: () => ({ definition: { input_schema: {} }, isConcurrencySafe: () => false }),
+          needsApproval: () => false,
+          resolveName: (n: string) => n,
+        },
+        hooks: null,
+        lspEnabled: false,
+        fileHistory: undefined,
+        contextClaimStore: undefined,
+        sessionId: 'e4-test-session',
+        promptEngine: { markGitDirty: () => {}, getModel: () => 'test-model' },
+      } as any,
+      cwd,
+      harness: {
+        executeTool: async ({ execute }: any) => {
+          const r = await execute()
+          return { content: r.content, isError: r.isError ?? false, retried: false }
+        },
+      } as any,
+      prewarm: { get: () => null, invalidate: () => {} } as any,
+      evidence: mockEvidence,
+      traceStore: { events: [], toolFingerprints: [] } as any,
+      repairHintTracker: { recordSuccess: () => {}, recordFailure: () => {} } as any,
+      repairPipeline: { run: (input: any) => ({ output: input, telemetry: [] }) } as any,
+      importGraph: null,
+      lastConflictCheckCount: 0,
+      trajectory: { getEntries: () => [] } as any,
+      getDoomLoopLevel: () => 'none' as const,
+      latestRisk: { level: 'none' as const, reasons: [], suggestedAction: '' },
+      sessionTurnCount: 1,
+      sessionId: 'e4-test-session',
+      recordToolHistory: () => {},
+      turnBudget: createTurnBudget(0),
+      ...overrides,
+    }
+  }
+
+  function recordingLsp() {
+    const notified: string[] = []
+    const mgr = {
+      isReady: () => false, // 只测 changeFile 通知，诊断段不参与
+      changeFile: (p: string) => { notified.push(p) },
+    }
+    return { notified, mgr }
+  }
+
+  it('hash_edit 执行成功后 file-history 出现对应记账，且备份为编辑前内容', async () => {
+    const dir = mkdtempSync(join(testTmp(), 'e4-hashedit-'))
+    try {
+      const target = join(dir, 'a.ts')
+      writeFileSync(target, 'hello', 'utf-8')
+      const fh = new FileHistory(join(dir, '.backups'), 'e4-session')
+      const deps = makeDeps(dir, { config: { ...makeDeps(dir).config, fileHistory: fh } as any })
+
+      const result = await executeToolUse(
+        { id: 'tu-e4-hash', name: 'hash_edit', input: { file_path: target, old_string: 'hello', new_string: 'world' } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.equal((result.toolResult as any).is_error ?? false, false, 'hash_edit 应执行成功')
+      const snap = fh.getAllSnapshots().find(s => s.messageId === 'tu-e4-hash')
+      assert.ok(snap, 'hash_edit 的 tool_use id 应进 file-history 快照（/undo 与回溯的记账源头）')
+      const backup = snap!.trackedFileBackups[target]
+      assert.ok(backup, '目标文件应被记账')
+      assert.ok(backup!.backupFileName, '应有实体备份文件（写前版本化）')
+      assert.equal(
+        readFileSync(join(dir, '.backups', 'e4-session', backup!.backupFileName!), 'utf-8'),
+        'hello',
+        '备份内容应为编辑前内容',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('apply_patch 执行成功后按 diff 目标逐文件记账（备份粒度=文件）；纯删除补丁保持跳过', async () => {
+    const dir = mkdtempSync(join(testTmp(), 'e4-applypatch-'))
+    try {
+      const target = join(dir, 'b.ts')
+      writeFileSync(target, 'one\n', 'utf-8')
+      const fh = new FileHistory(join(dir, '.backups'), 'e4-session')
+      const deps = makeDeps(dir, { config: { ...makeDeps(dir).config, fileHistory: fh } as any })
+
+      // diff 头带绝对路径：extractWriteFilePaths 剥 b/ 前缀后即目标本身
+      const diffText = [
+        `--- a/${target}`,
+        `+++ b/${target}`,
+        '@@ -1 +1,2 @@',
+        ' one',
+        '+two',
+      ].join('\n')
+      const result = await executeToolUse(
+        { id: 'tu-e4-patch', name: 'apply_patch', input: { diff: diffText } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.equal((result.toolResult as any).is_error ?? false, false, 'apply_patch 应执行成功')
+      const snap = fh.getAllSnapshots().find(s => s.messageId === 'tu-e4-patch')
+      assert.ok(snap, 'apply_patch 的 tool_use id 应进 file-history 快照')
+      const backup = snap!.trackedFileBackups[target]
+      assert.ok(backup, 'diff 目标应被逐文件记账')
+      assert.ok(backup!.backupFileName, '应有实体备份文件')
+      assert.equal(
+        readFileSync(join(dir, '.backups', 'e4-session', backup!.backupFileName!), 'utf-8'),
+        'one\n',
+        '备份应为打补丁前的文件内容',
+      )
+
+      // 纯删除补丁（+++ /dev/null）：与既有 targets 提取保持一致的跳过语义
+      const delDiff = [
+        `--- a/${target}`,
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        '-one',
+      ].join('\n')
+      await executeToolUse(
+        { id: 'tu-e4-patch-del', name: 'apply_patch', input: { diff: delDiff } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.ok(
+        !fh.getAllSnapshots().some(s => s.messageId === 'tu-e4-patch-del'),
+        '纯删除补丁不应产生记账',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('LSP changeFile：apply_patch 的 diff 目标被逐个通知（删除经 --- 回退也在内）', async () => {
+    const dir = mkdtempSync(join(testTmp(), 'e4-lsp-patch-'))
+    try {
+      const { notified, mgr } = recordingLsp()
+      const deps = makeDeps(dir, { getLspManager: () => mgr as any })
+
+      const diffText = [
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -1 +1,2 @@',
+        '+x',
+        '--- a/src/gone.ts',
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        '-y',
+      ].join('\n')
+      await executeToolUse(
+        { id: 'tu-e4-lsp-patch', name: 'apply_patch', input: { diff: diffText } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.deepEqual(
+        notified.sort(),
+        ['src/a.ts', 'src/gone.ts'],
+        'diff 的每个目标都应逐个 changeFile（此前读恒为 undefined 的 input.file_path，通知从未到达）',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('LSP changeFile：ast_edit 按 paths 通知、hash_edit 通知 file_path；dryRun/失败/缺路径不通知', async () => {
+    const dir = mkdtempSync(join(testTmp(), 'e4-lsp-paths-'))
+    try {
+      const { notified, mgr } = recordingLsp()
+      const deps = makeDeps(dir, { getLspManager: () => mgr as any })
+
+      await executeToolUse(
+        { id: 'tu-e4-lsp-ast', name: 'ast_edit', input: { paths: ['x.ts', 'y.ts'], ops: [{ find: 'a', replace: 'b' }] } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.deepEqual(notified.sort(), ['x.ts', 'y.ts'], 'ast_edit 的 paths 数组应被逐个通知')
+
+      notified.length = 0
+      await executeToolUse(
+        { id: 'tu-e4-lsp-ast-dry', name: 'ast_edit', input: { paths: ['x.ts'], ops: [{ find: 'a', replace: 'b' }], dryRun: true } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.equal(notified.length, 0, 'dryRun 不写盘，不应通知 LSP')
+
+      notified.length = 0
+      await executeToolUse(
+        { id: 'tu-e4-lsp-hash', name: 'hash_edit', input: { file_path: 'z.ts', old_string: 'a', new_string: 'b' } },
+        deps, noopCb as any, 1, false,
+      )
+      assert.deepEqual(notified, ['z.ts'], 'hash_edit 应按 file_path 通知')
+
+      const failDeps = makeDeps(dir, {
+        getLspManager: () => mgr as any,
+        config: {
+          ...makeDeps(dir).config,
+          toolRegistry: {
+            execute: async () => ({ content: 'boom', isError: true }),
+            get: () => ({ definition: { input_schema: {} }, isConcurrencySafe: () => false }),
+            needsApproval: () => false,
+            resolveName: (n: string) => n,
+          },
+        } as any,
+      })
+      notified.length = 0
+      await executeToolUse(
+        { id: 'tu-e4-lsp-ast-fail', name: 'ast_edit', input: { paths: ['x.ts'], ops: [{ find: 'a', replace: 'b' }] } },
+        failDeps, noopCb as any, 1, false,
+      )
+      assert.equal(notified.length, 0, '执行失败不通知（保留既有 isError 门）')
+
+      notified.length = 0
+      await executeToolUse(
+        { id: 'tu-e4-lsp-edit-nopath', name: 'edit_file', input: {} },
+        deps, noopCb as any, 1, false,
+      )
+      assert.equal(notified.length, 0, '解析不出路径时不通知（保留既有空值防御，且不再以 undefined 调用）')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ── 写工具账本覆盖：checkpoint 回滚范围 / prewarm / evidence ──────────────
+// 病灶：这三处名单仍是「写工具 = write_file + edit_file」。
+// recordAgentTouchedFile 是 rollbackToCheckpoint 的唯一文件来源
+// （checkpoint.ts「Roll back only agent-owned files」）——漏记 = 这些工具的修改
+// 落在 YOLO 档 safety net（checkpoints + rollback）的回滚窗外；prewarm 漏记 =
+// 改完文件后预读缓存仍返回旧内容。
+describe('写工具账本覆盖（rollback 范围 / prewarm / evidence）', () => {
+  // 每个用例独立 session id：checkpoint 数据按 session 落盘（checkpointFileForSession），
+  // 共用同一 id 会让同 describe 内的用例争用同一个文件（getRollbackPreview 只按
+  // sessionId 取数据、不按 cwd 过滤）。
+  const SID_HASH = 'ledger-hash-session'
+  const SID_PATCH = 'ledger-patch-session'
+
+  function makeGitRepo(files: string[] = ['seed.txt']): string {
+    const dir = mkdtempSync(join(testTmp(), 'ledger-'))
+    // 目标文件必须**先 tracked 提交**再建 checkpoint：createCheckpoint 会把当时的
+    // untracked/dirty 记为 preExisting*（protected），而 getRollbackPreview 会把
+    // 它们从候选里滤掉——新建的 untracked 目标文件永远看不到 preview。
+    for (const f of files) writeFileSync(join(dir, f), `initial ${f}\n`)
+    execFileSync('git', ['init', '-q'], { cwd: dir })
+    execFileSync('git', ['add', '-A'], { cwd: dir })
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'seed'], { cwd: dir })
+    return dir
+  }
+
+  function ledgerDeps(dir: string, sid: string, sink: { invalidated: string[]; modified: string[] }): ToolPipelineDeps {
+    return {
+      config: {
+        toolRegistry: {
+          execute: async () => ({ content: 'ok', isError: false }),
+          get: () => ({ definition: { input_schema: {} }, isConcurrencySafe: () => false }),
+          needsApproval: () => false,
+          resolveName: (n: string) => n,
+        },
+        hooks: null,
+        lspEnabled: false,
+        fileHistory: undefined,
+        contextClaimStore: undefined,
+        sessionId: sid,
+        promptEngine: { markGitDirty: () => {}, getModel: () => 'test-model' },
+      } as any,
+      cwd: dir,
+      harness: {
+        executeTool: async ({ execute }: any) => {
+          const r = await execute()
+          return { content: r.content, isError: r.isError ?? false, retried: false }
+        },
+      } as any,
+      prewarm: { get: () => null, invalidate: (p: string) => { sink.invalidated.push(p) } } as any,
+      evidence: { ...mockEvidence, trackFileModified: (p: string) => { sink.modified.push(p) } } as any,
+      traceStore: { events: [], toolFingerprints: [] } as any,
+      repairHintTracker: { recordSuccess: () => {}, recordFailure: () => {} } as any,
+      repairPipeline: { run: (input: any) => ({ output: input, telemetry: [] }) } as any,
+      importGraph: null,
+      lastConflictCheckCount: 0,
+      trajectory: { getEntries: () => [] } as any,
+      getDoomLoopLevel: () => 'none' as const,
+      latestRisk: { level: 'none' as const, reasons: [], suggestedAction: '' },
+      sessionTurnCount: 1,
+      sessionId: sid,
+      recordToolHistory: () => {},
+      turnBudget: createTurnBudget(0),
+      // 注入桩：真实 createCheckpoint 会在 pre 段重跑一次，把测试刚改过的目标文件
+      // 记进 preExistingDirtyFiles——随后被 getRollbackPreview 的 protected 过滤掉，
+      // 于是测的是测试自身的时序而非被测行为（用 #133 加的接缝规避）。
+      createCheckpoint: async () => ({ hash: 'deadbeef', timestamp: 1, message: 'auto' }),
+    } as ToolPipelineDeps
+  }
+
+  const ledgerCb = { onToolResult: () => {}, onApprovalRequired: async () => true } as any
+
+  it('hash_edit：编辑进 checkpoint 回滚范围，且失效 prewarm / 登记 evidence', async () => {
+    const dir = makeGitRepo(['a.ts'])
+    try {
+      await createCheckpoint(dir, 'auto', SID_HASH)
+      const target = join(dir, 'a.ts')
+      writeFileSync(target, 'hello')
+      const sink = { invalidated: [] as string[], modified: [] as string[] }
+
+      await executeToolUse(
+        { id: 'tu-ledger-hash', name: 'hash_edit', input: { file_path: target, old_string: 'hello', new_string: 'world' } },
+        ledgerDeps(dir, SID_HASH, sink), ledgerCb, 1, false,
+      )
+
+      const preview = await getRollbackPreview(dir, SID_HASH)
+      assert.ok(preview, 'checkpoint 应可预览（否则说明 agentTouchedFiles 为空——回滚窗已丢）')
+      assert.match(preview!.text, /a\.ts/, 'hash_edit 的编辑必须落在回滚范围内')
+      assert.ok(sink.invalidated.length > 0, 'hash_edit 后必须失效 prewarm 缓存（否则读回旧内容）')
+      assert.ok(sink.modified.length > 0, 'hash_edit 后必须登记 evidence.trackFileModified')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('apply_patch：diff 目标进回滚范围并登记 evidence（路径来自 diff 头，非 file_path）', async () => {
+    const dir = makeGitRepo(['b.ts'])
+    try {
+      await createCheckpoint(dir, 'auto', SID_PATCH)
+      const target = join(dir, 'b.ts')
+      writeFileSync(target, 'one\n')
+      const sink = { invalidated: [] as string[], modified: [] as string[] }
+      const diffText = [
+        `--- a/${target}`,
+        `+++ b/${target}`,
+        '@@ -1 +1,2 @@',
+        ' one',
+        '+two',
+      ].join('\n')
+
+      await executeToolUse(
+        { id: 'tu-ledger-patch', name: 'apply_patch', input: { diff: diffText } },
+        ledgerDeps(dir, SID_PATCH, sink), ledgerCb, 1, false,
+      )
+
+      const preview = await getRollbackPreview(dir, SID_PATCH)
+      assert.ok(preview, 'checkpoint 应可预览（apply_patch 的回滚范围不能为空）')
+      assert.match(preview!.text, /b\.ts/, 'apply_patch 的 diff 目标必须落在回滚范围内')
+      assert.ok(sink.modified.some(p => p.includes('b.ts')), 'apply_patch 必须登记 evidence.trackFileModified')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

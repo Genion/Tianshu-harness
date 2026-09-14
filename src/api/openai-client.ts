@@ -9,6 +9,7 @@ import { fetchWithTimeout } from './fetch-timeout.js'
 import { withStructuredRetry } from './retry-engine.js'
 import { parseRetryAfterMs } from './error-classifier.js'
 import { ReasoningRepetitionGuard } from './reasoning-repetition.js'
+import { normalizeBaseUrl } from './endpoint-map.js'
 import { sanitizeMessageContent } from '../utils/sanitize.js'
 import { stableStringify } from './stable-json.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
@@ -768,7 +769,7 @@ export class OpenAIClient implements StreamClient {
       }
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
-      const response = await fetchWithTimeout(`${this.config.baseUrl}/chat/completions`, {
+      const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

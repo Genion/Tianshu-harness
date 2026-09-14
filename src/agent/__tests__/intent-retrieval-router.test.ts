@@ -47,6 +47,29 @@ describe('intent retrieval router prompt', () => {
     assert.match(prompt, /用户关键词是线索不是边界/)
     assert.doesNotMatch(prompt, /undefined/)
   })
+
+  // 台账 F8：askLine 从底部上找请求句——多子任务消息只留最后一项，
+  // 分类器据此产出的 objectiveSummary 丢失其余子任务（三问题实测只剩问题 3）。
+  it('多子任务消息：objectiveSummary 覆盖各子任务，不只剩最后一项', () => {
+    const message = [
+      '需要检查以下三个问题：',
+      '1. 缓存命中率下降的根因是什么',
+      '2. 会话恢复时丢消息的边界在哪',
+      '3. 检查 wiring 校验的两条假红',
+    ].join('\n')
+    const prompt = buildIntentRouterPrompt(input(message))
+    const objectiveLine = prompt.split('\n').find(l => l.startsWith('objectiveSummary:')) ?? ''
+    assert.ok(objectiveLine.includes('缓存命中率'), `objective 应含子任务 1：${objectiveLine}`)
+    assert.ok(objectiveLine.includes('会话恢复'), `objective 应含子任务 2：${objectiveLine}`)
+    assert.ok(objectiveLine.includes('wiring'), `objective 应含子任务 3：${objectiveLine}`)
+  })
+
+  it('单任务消息保持原行为（不误折叠）', () => {
+    const prompt = buildIntentRouterPrompt(input('修复这个失败'))
+    const objectiveLine = prompt.split('\n').find(l => l.startsWith('objectiveSummary:')) ?? ''
+    assert.ok(objectiveLine.includes('修复这个失败'))
+    assert.ok(!objectiveLine.includes(' | '), `单任务消息不得被折叠：${objectiveLine}`)
+  })
 })
 
 describe('classifyIntentRetrievalRoute', () => {

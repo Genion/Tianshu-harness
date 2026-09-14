@@ -89,3 +89,24 @@ test('汇总出现在子进程的 stderr 也认（不依赖输出通道）', asy
   assert.equal(r.tests, 5)
   assert.equal(r.code, 0)
 })
+
+test('挂起被看门狗收场时：报告已见进度与末帧片段（而非把已跑测试记成 0）', async () => {
+  // 线上形态：子进程先跑掉一批用例，随后卡住不再输出。此刻没有汇总行，
+  // 但「跑了多少 / 卡在最后哪一行」是可观测的——判据应当把它报出来，
+  // 否则跨批合计会把整批已跑的测试记成 0（数字失真，且无从定位挂死点）。
+  const script = `
+    console.log('✔ alpha (1ms)')
+    console.log('  ✔ nested beta (2ms)')
+    console.log('✖ gamma (3ms)')
+    console.log('▶ delta suite — 卡在这里')
+    setInterval(() => {}, 1000)
+  `
+  const r = await run(script, { idleMs: 1_500, hardMs: 10_000 })
+  assert.equal(r.summarySeen, false, '无汇总行')
+  assert.equal(r.killed, 'idle', '看门狗收场')
+  assert.notEqual(r.code, 0, 'fail-closed 不变：无汇总仍判失败')
+  assert.ok(r.seenChecks, '应报告已见进度')
+  assert.equal(r.seenChecks?.pass, 2, '已见 2 条通过（含缩进嵌套用例）')
+  assert.equal(r.seenChecks?.fail, 1, '已见 1 条失败')
+  assert.match(r.tailExcerpt, /delta suite/, '末帧片段应含最后一条输出，用于定位卡在哪')
+})

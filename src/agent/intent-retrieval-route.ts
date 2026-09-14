@@ -469,13 +469,33 @@ export function extractAskLine(message: string): string {
   return lines[0]!
 }
 
+/**
+ * 消息是否呈多子任务结构（≥2 个编号/列表项）。台账 F8：askLine 从底部上找请求句，
+ * 多子任务消息只保最后一项——objectiveSummary 因此丢失其余任务（三问题实测只剩
+ * 问题 3，分类器据此出 sources 会漏掉前两个问题的方向）。
+ */
+export function hasMultipleListItems(message: string): boolean {
+  const items = message.split('\n').filter(l => /^\s*(?:\d+[.、)]|[-*•])\s+\S/.test(l))
+  return items.length >= 2
+}
+
+/** 多子任务 objective：非空行折叠为 " | " 概述（截 maxLen）——保住各子任务的关键词。
+ *  调用方在有 hasMultipleListItems 为真时使用；单任务走原单行逻辑。 */
+export function foldMultiPartObjective(message: string, maxLen: number): string {
+  const lines = message.split('\n').map(l => l.trim()).filter(Boolean)
+  return lines.slice(0, 6).join(' | ').slice(0, maxLen)
+}
+
 function summarizeObjective(input: RetrievalRouteInput): string | undefined {
   const firstLine = input.userMessage.split('\n')[0]?.trim() || ''
   const askLine = extractAskLine(input.userMessage)
-  // 请求句与首行不同时优先请求句；否则保持原行为（contract objective 优先）
-  const objective = askLine && askLine !== firstLine
-    ? askLine
-    : (input.taskContract?.objective || firstLine)
+  // 多子任务消息：单行 askLine 只留最后一项（台账 F8）——折叠为概述覆盖各子任务；
+  // 其余保持原行为（请求句与首行不同时优先请求句；否则 contract objective 优先）。
+  const objective = hasMultipleListItems(input.userMessage)
+    ? foldMultiPartObjective(input.userMessage, MAX_FIELD_LENGTH)
+    : (askLine && askLine !== firstLine
+        ? askLine
+        : (input.taskContract?.objective || firstLine))
   return truncate(objective, MAX_FIELD_LENGTH) || undefined
 }
 

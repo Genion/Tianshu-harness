@@ -5,15 +5,19 @@ import type { OaiMessage } from '../api/oai-types.js'
 import { cpuPool } from '../workers/cpu-pool.js'
 import { diffLinesRaw } from '../workers/cpu-tasks.js'
 import type { RawChange } from '../workers/cpu-tasks.js'
+import { WRITE_TOOL_NAMES } from '../tools/write-tool-helpers.js'
 
 const MAX_SNAPSHOTS = 100
 
 /**
- * The write_file / edit_file tool_use ids whose calls occurred at or after
- * `messageIndex` — i.e. edits made after a conversation boundary. These key the
- * FileHistory snapshots a precise rewind to that boundary undoes. Shared by the
- * server (session-manager) and the in-process TUI rewind flow so both compute
- * the boundary identically.
+ * The write-tool tool_use ids whose calls occurred at or after `messageIndex`
+ * — i.e. edits made after a conversation boundary. These key the FileHistory
+ * snapshots a precise rewind to that boundary undoes. The tool roster is the
+ * shared WRITE_TOOL_NAMES (write_file / edit_file / hash_edit / ast_edit /
+ * apply_patch) — the same set tool-pipeline tracks via trackEdit, so every
+ * agent-edited file is rewindable regardless of which write tool made the
+ * edit. Shared by the server (session-manager) and the in-process TUI rewind
+ * flow so both compute the boundary identically.
  */
 export function collectPostBoundaryEditIds(messages: OaiMessage[], messageIndex: number): Set<string> {
   const ids = new Set<string>()
@@ -22,7 +26,7 @@ export function collectPostBoundaryEditIds(messages: OaiMessage[], messageIndex:
     if (m && m.role === 'assistant' && Array.isArray(m.tool_calls)) {
       for (const tc of m.tool_calls) {
         const name = tc.function?.name
-        if (name === 'write_file' || name === 'edit_file') ids.add(tc.id)
+        if (name && WRITE_TOOL_NAMES.has(name)) ids.add(tc.id)
       }
     }
   }
@@ -58,6 +62,20 @@ export class FileHistory {
     private backupDir: string,
     private sessionId: string,
   ) {}
+
+  /**
+   * /cd 换工作区后按新备份根重建实例（备份根焊死构造期 cwd，不能原地复用）。
+   * 备份文件已随 migrateSessionFiles 整体迁到新 slug 目录，内存快照与 tracked
+   * 名单原样随迁——新实例对接管前的全部 undo 历史仍然可读可回滚，无缝接管。
+   * 继续复用旧实例的后果：rewind 读旧路径备份 ENOENT 被当「missing」静默跳过
+   * （撤销无声丢失）、新编辑在旧项目路径 mkdir 复活旧会话目录（跨项目状态脑裂）。
+   */
+  withBackupRoot(backupDir: string): FileHistory {
+    const next = new FileHistory(backupDir, this.sessionId)
+    next.snapshots = this.snapshots
+    next.trackedFiles = this.trackedFiles
+    return next
+  }
 
   async trackEdit(filePath: string, messageId: string): Promise<void> {
     this.trackedFiles.add(filePath)
@@ -154,8 +172,10 @@ export class FileHistory {
    * was edited AFTER the boundary back to its content as of that boundary, and
    * delete files first created after it.
    *
-   * `postBoundaryIds` = the set of edit tool_use ids (write_file / edit_file)
-   * whose calls occurred after the boundary, in message order. For each file the
+   * `postBoundaryIds` = the set of write-tool tool_use ids (all of
+   * WRITE_TOOL_NAMES — write_file / edit_file / hash_edit / ast_edit /
+   * apply_patch) whose calls occurred after the boundary, in message order.
+   * For each file the
    * EARLIEST post-boundary snapshot that touched it holds the file's pre-edit
    * content — which is exactly its state at the boundary (no edits happened
    * between the boundary and that first post-boundary edit). Restoring that

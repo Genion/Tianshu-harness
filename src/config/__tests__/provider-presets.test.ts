@@ -62,9 +62,12 @@ describe('provider presets', () => {
     assert.equal(codex.models[0]?.id, 'gpt-5.6-sol')
   })
 
-  it('deepseek 已退役 v4pro（官方 2026-09-14 下线）+ flash 档 reasoningEffort', () => {
+  it('deepseek v4-pro 已恢复（官方 2026-09-13 改口径：继续服务不下线）+ flash 档 reasoningEffort', () => {
     const deepseek = cloneProviderPreset('deepseek')
-    assert.equal(deepseek.models.some(m => m.id === 'deepseek-v4-pro'), false, 'V4-Pro 条目已移除')
+    const v4pro = deepseek.models.find(m => m.id === 'deepseek-v4-pro')
+    assert.ok(v4pro, 'V4-Pro 条目在（官方改口径，撤销 ea8d9c92c 退役）')
+    assert.equal(v4pro.tier, 'strong')
+    assert.equal(v4pro.alias, 'v4-pro')
     assert.equal(deepseek.models.find(m => m.id === 'deepseek-v4-flash')?.reasoningEffort, 'medium')
   })
 
@@ -82,7 +85,7 @@ describe('provider presets', () => {
     )
   })
 
-  it('deepseek-flash 承接 strong 档 + 默认档指向 v4-flash', () => {
+  it('deepseek strong 档双卡并存（v4-pro + deepseek-flash）+ 默认档指向 v4-flash', () => {
     const deepseek = cloneProviderPreset('deepseek')
     const next = deepseek.models.find(m => m.id === 'deepseek-flash')
     assert.ok(next, 'deepseek-flash 必须在 deepseek 预设模型列表')
@@ -91,14 +94,15 @@ describe('provider presets', () => {
     assert.equal(next.supportsVision, true, '原生多模态声明视觉')
     assert.deepEqual(next.pricing, { input: 1, output: 2, cacheRead: 0.02, cacheWrite: 1 })
     assert.equal(next.reasoningEffort, 'medium')
-    // 2026-09-11：V4-Pro 退役后由本卡承接 strong 档。瑶光门席位（议事会天府 /
-    // 三柱护栏席）与 planning 路由都按 tier 解析——这里必须是 'strong'，否则
-    // strong 卡池为空 → selectModelForTask 静默回退全池，声明 strong 的席位
-    // 会在无留痕的情况下跑 cheap 卡。
+    // 2026-09-13：v4-pro 官方改口径继续服务（撤销退役）后，deepseek 有两个 strong 档——
+    // v4-pro（3/6 价、纯文本推理）与 deepseek-flash（1/2 价、视觉多模态）。瑶光门席位
+    // 按 tier 解析时池内两卡都合法，成本差由席位自身预算约束；本卡保持 'strong'——
+    // 否则纯文本强档只剩 v4-pro 一张 3/6 价卡，cheap 回退线失效。
     assert.equal(next.tier, 'strong')
-    assert.equal(deepseek.models.some(m => m.id === 'deepseek-v4-pro'), false, 'V4-Pro 已退役')
+    const strongTiers = deepseek.models.filter(m => m.tier === 'strong').map(m => m.id)
+    assert.deepEqual(strongTiers, ['deepseek-v4-pro', 'deepseek-flash'], '两个 strong 档并存')
     assert.equal(PROVIDER_PRESETS.deepseek.defaultModelId, 'deepseek-v4-flash', '默认档指向 v4-flash')
-    assert.equal(deepseek.models[0]?.id, 'deepseek-v4-flash', '首模型（无 defaultModel 时的启动兜底）同为 v4-flash')
+    assert.equal(deepseek.models[0]?.id, 'deepseek-v4-flash', '首模型（无 defaultModel 时的启动兜底）为 v4-flash——条目顺序复原')
   })
 
   it('deepseek 预设始终留有 strong 卡（瑶光门落点不变量）', () => {
@@ -148,6 +152,16 @@ describe('provider presets', () => {
     assert.equal(budget.contextWindow, 262_144)
     assert.equal(budget.reasoningEffort, 'max')
     assert.deepEqual(budget.pricing, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+  })
+
+  // PR-4 收口：DeepSeek 默认档从旗舰（v4-pro）改为快速档（v4-flash），预设表内也把
+  // flash 提到首位。钉住预设内容本身——先前只有 TUI 的 connect-flow 用字面量间接钉着，
+  // 那条改为「跟随预设」的派生断言后，内容层面需要在这里接住（内容归属 config）。
+  it('deepseek 预设默认档为 v4-flash，且默认档必在模型列表内并排首位', () => {
+    assert.equal(PROVIDER_PRESETS.deepseek.defaultModelId, 'deepseek-v4-flash')
+    const ids = PROVIDER_PRESETS.deepseek.provider.models.map(m => m.id)
+    assert.ok(ids.includes(PROVIDER_PRESETS.deepseek.defaultModelId), 'defaultModelId 必须在预设模型列表内')
+    assert.equal(ids[0], 'deepseek-v4-flash', '默认档排首位（连接向导按此顺序展示可勾选模型）')
   })
 
   it('DEFAULT_CONFIG.kimi 与 kimi 预设同源（端点/apiKeyEnv/模型 id 序列）', () => {

@@ -13,6 +13,8 @@ import { join } from 'node:path'
 import {
   warmPluginToolsCache,
   pluginToolsSnapshot,
+  pluginToolsWarmup,
+  isPluginWarmStarted,
   invalidatePluginToolsCache,
   partitionPluginTools,
   __resetPluginToolsCacheForTests,
@@ -84,6 +86,25 @@ describe('plugin-session-cache 暖场/快照/失效', () => {
     assert.equal(snap!.loaded, 1)
     assert.deepEqual(snap!.tools.map((t) => t.definition.name), ['alpha_tool'])
     assert.deepEqual(snap!.suppressTools, [])
+  })
+
+  it('pluginToolsWarmup：无在飞立即落定；在飞时随暖场落定且快照可见（阶段 3 createAgent 有界等待）', async () => {
+    __resetPluginToolsCacheForTests()
+    const home = makeHome()
+    writeFixturePlugin(home, 'alpha-plugin', 'alpha_tool')
+
+    assert.equal(isPluginWarmStarted(), false, '未点火')
+    await pluginToolsWarmup() // 无在飞 → 立即 resolve，不挂
+    assert.equal(pluginToolsSnapshot(), null, '未点火时等待不会隐式点火')
+
+    warmPluginToolsCache(undefined, process.cwd())
+    assert.equal(isPluginWarmStarted(), true, '点火即视为已开始（在飞）')
+    await pluginToolsWarmup()
+    const snap = pluginToolsSnapshot()
+    assert.ok(snap, '等待落定后快照必须就位——这是 createAgent 不再无插件装配的依据')
+    assert.deepEqual(snap!.tools.map((t) => t.definition.name), ['alpha_tool'])
+    await pluginToolsWarmup() // 已有缓存 → 立即
+    assert.equal(isPluginWarmStarted(), true)
   })
 
   it('invalidate 清缓存并重建——新安装/启停下一个会话生效', async () => {
@@ -209,8 +230,15 @@ describe('sidecar 插件装配接线（源码契约，防摘除）', () => {
     assert.match(serveAgentSrc, /refs\.pluginCommands = pluginSnap\.commands/, 'pluginCommands 应换真装配')
   })
 
-  it('runServe 启动暖场（initializePlugins 先于会话进入缓存）', () => {
+  it('runServe 启动暖场（阶段 3 起延后到 listen 之后点火，createAgent 有界等待兜底）', () => {
     assert.match(serveSrc, /warmPluginToolsCache\(ctx\.config\.plugins, process\.cwd\(\)\)/, 'runServe 应启动暖场')
+    // 点火点必须在 startServer 之后（延迟预热回调内），不再是 runServe 入口。
+    const listenAt = serveSrc.indexOf('await startServer(port, routes, apiToken')
+    const warmAt = serveSrc.indexOf('warmPluginToolsCache(ctx.config.plugins, process.cwd())')
+    assert.ok(listenAt > -1 && warmAt > listenAt, '暖场点火应位于 listen 之后的延迟预热回调内')
+    // createAgent 侧：拉响 + 有界等待（不因预热延后而让早期会话退化成无插件装配）。
+    assert.match(serveSrc, /warmup\?\.fireNow\(\)/, 'createAgent 应即时拉响预热')
+    assert.match(serveSrc, /pluginToolsWarmup\(\),\s*new Promise<void>\(\(resolve\) => \{ setTimeout\(resolve, PLUGIN_WARM_WAIT_CAP_MS\)/, 'createAgent 应对插件快照做有界等待')
   })
 
   it('plugin-api 安装/启停/卸载三处失效重建', () => {

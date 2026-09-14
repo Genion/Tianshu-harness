@@ -5,6 +5,7 @@ import type { Sensorium, StrategyProfile } from './sensorium.js'
 import { TurnHeartbeat } from './turn-heartbeat.js'
 import { wrapCallbacksWithHeartbeat } from './turn-orchestrator.js'
 import { debugLog } from '../utils/debug.js'
+import { endsWithInterruptMarker } from './interrupt-marker.js'
 import { recordAppendixTrace } from './appendix-trace.js'
 import { createTraceStore } from './trace-store.js'
 import { createPredictionAccumulator, computeEFE } from './prediction-error.js'
@@ -258,7 +259,9 @@ export class TurnStepProducer {
       const tailMsgs = this.self.session.getMessages()
       const tail = tailMsgs[tailMsgs.length - 1]
       if (tail && (
-        tail.role === 'user' ||
+        // 打断留痕（任务 4）在末尾留下的是「已处理的」user 消息（独立 SR 消息或
+        // 用户原文+标记后缀），不是「上一轮未答」——豁免，避免每次打断刷一条误报。
+        (tail.role === 'user' && !(typeof tail.content === 'string' && endsWithInterruptMarker(tail.content))) ||
         (tail.role === 'assistant' && !tail.content && !tail.tool_calls)
       )) {
         debugLog(`[history-invariant] run starts with unanswered tail: role=${tail.role} msgCount=${tailMsgs.length} — previous assistant reply was not persisted; model may re-answer the previous turn`)
@@ -1130,6 +1133,10 @@ export class TurnStepProducer {
           filesRead: es.filesRead,
           filesModified: es.filesModified,
           requiresCodeVerification: eligibility.requiresCodeVerification,
+          // 「Task start」只属于契约起步窗口（台账 F6）：evidence 的 filesModified
+          // 按 run 重置，任务中段的新 run 开头「零编辑」会误成立——只读轮/继续轮
+          // 因此反复收到 Task start 文案（实测两次）。用契约创建轮做准确判据。
+          taskStart: this.self.session.getTurnCount() - this.self.taskContract.createdAtTurn <= 1,
         })
         if (tddHint) this.self._lastImmuneHint = tddHint
 

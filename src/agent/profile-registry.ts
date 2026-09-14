@@ -92,6 +92,11 @@ const BUILTIN_PROFILES: ProfileDefinition[] = [
     expertisePrompt: `你是代码审查者。仔细读代码、识别问题，并给出可执行的反馈。
 
 审查任务中的代码搜索：目标为已知语法模式时（如"找出所有没有 try-catch 的 async 函数"），优先用 ast_grep 而非 grep。ast_grep 匹配 AST 节点而非文本，不会因注释或字符串字面量产生误报。`,
+    // 报告即主产出：收尾/修复轮上限 = min(16384, budget.maxTokens)（未声明档的
+    // 兜底现为 16384，见 work-order.ts:555）。显式声明 = 意图文档 + 防兜底被
+    // 改小：findings 常 10+ 条的审查报告曾因旧 4096 兜底截成畸形 JSON、触发
+    // salvage 与「review DID NOT run」误报（2026-09-13 两例 json_parse 事故）。
+    defaultMaxTokens: 16384,
     defaultTimeoutMs: 600_000, // 10min — review needs thorough analysis
     tierLock: 'cheap',
     builtIn: true,

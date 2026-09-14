@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DANGEROUS_BASH_PATTERNS } from '../agent/approval-risk.js'
-import { detectSensitiveGitAdd } from './sensitive-file-detector.js'
+import { detectSensitiveGitAdd, AGGREGATE_ADD_MARKER } from './sensitive-file-detector.js'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import { track } from './process-tracker.js'
 import { killProcessTree } from './process-kill.js'
@@ -108,14 +108,17 @@ const SAFE_ENV_PREFIXES = [
   // managers rely on these; stripping them broke `mvn`/`java` when launched from
   // a GUI with a minimal env. None contain sensitive keywords, so the KEY/TOKEN/
   // SECRET filter below still removes anything genuinely secret.
-  'JAVA_HOME', 'JDK_HOME', 'JRE_HOME', 'CLASSPATH', 'JAVA_TOOL_OPTIONS',
+  'JAVA_HOME', 'JDK_HOME', 'JRE_HOME', 'CLASSPATH',
   'MAVEN_', 'M2_', 'M2', 'GRADLE_', 'ANT_HOME',
   'GOPATH', 'GOROOT', 'GOBIN', 'GO111MODULE', 'GOFLAGS', 'GOPROXY',
   'CARGO_HOME', 'RUSTUP_HOME',
   'ANDROID_', 'NVM_DIR', 'PYENV', 'SDKMAN_DIR',
   'DOTNET_', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_',
   'PNPM_HOME', 'VOLTA_HOME', 'FNM_DIR', 'MISE_', 'ASDF_', 'RBENV_ROOT', 'GEM_',
-  'NODE_PATH', 'NODE_OPTIONS', 'KUBECONFIG', 'DOCKER_HOST',
+  // 注意：NODE_OPTIONS / JAVA_TOOL_OPTIONS 刻意排除（issue #137）——
+  // 它们可在子进程启动时注入 --require/-javaagent 任意代码，构成环境污染
+  // 攻击面；不含 KEY/TOKEN/SECRET 关键词，敏感过滤兜不住，必须显式剥离。
+  'NODE_PATH', 'KUBECONFIG', 'DOCKER_HOST',
 ] as const
 
 /** Keywords that indicate a sensitive env var — vars containing these substrings are stripped. */
@@ -388,12 +391,21 @@ function bashReadKey(command: string, filePath: string): string {
   return `${verb}:${filePath}`
 }
 
+/** 仅接受「像文件路径」的捕获：管道过滤器的参数（'✔'、纯符号、-数字）不得进
+ *  key——key 退化为 `other:✔` 会让同尾巴形态的不同命令互相误报（台账 F1）。
+ *  漏检代价（Makefile 这类无 `/` 无 `.` 的文件不被跟踪）远小于误报代价。 */
+function looksLikeFilePath(candidate: string): boolean {
+  if (candidate.startsWith('-')) return false
+  return candidate.includes('/') || candidate.includes('.')
+}
+
 export function checkBashReread(command: string, toolUseId: string): string | null {
   for (const pattern of BASH_READ_PATTERNS) {
     pattern.lastIndex = 0
     let match: RegExpExecArray | null
     while ((match = pattern.exec(command)) !== null) {
       const filePath = match[1]!
+      if (!looksLikeFilePath(filePath)) continue
       if (filePath.startsWith('/tmp/') || filePath.startsWith('/dev/') || filePath === '-') continue
       const key = bashReadKey(command, filePath)
       const prior = bashFileReads.get(key)
@@ -523,6 +535,9 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     debugLog(`[bash-spawn] kind=${shell.kind} shell=${shell.cmd} args=${JSON.stringify(shell.args)} cwd=${params.cwd ?? process.cwd()}`)
     const child = track(spawn(shell.cmd, [...shell.args, commandToRun], {
+      // Hide the transient console window on Windows (no-op elsewhere) — also
+      // avoids stdio handoff quirks；置于首行以落在 architecture-guards 的 ±10 行窗口内。
+      windowsHide: true,
       cwd: params.cwd,
       env: { ...sanitizeEnv(getResolvedEnv(params.cwd)), ...mirrorEnv, ...earlyFailEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -530,9 +545,6 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       // console created in detached mode doesn't connect back to the parent's
       // pipes, causing all commands to return exit=0 with empty output.
       detached: process.platform !== 'win32',
-      // Hide the transient console window on Windows (no-op elsewhere) — also
-      // avoids stdio handoff quirks in some Windows environments.
-      windowsHide: true,
     }))
 
     let stdout = ''
@@ -1026,10 +1038,12 @@ export const BASH_TOOL: Tool = {
     )) {
       return true
     }
-    // git add 敏感文件硬门（prompt 安全纪律的运行时落地）：命令文本暂存凭据/密钥
-    // 文件 → 需审批。检测器 fail-closed 且不抛——不可解析的命令最多漏报，不会崩。
-    return detectSensitiveGitAdd(rawCommand).length > 0
-      || detectSensitiveGitAdd(rewrittenCommand).length > 0
+    // git add 敏感文件硬门（prompt 安全纪律的运行时落地）：命令文本暂存具体
+    // 凭据/密钥文件 → 需审批。聚合形态（. / -A / --all）只返回哨兵项，不在此
+    // 收审批（`git add -A && git commit` 属常规流）；哨兵由 assessToolRisk 消费
+    // 为 medium 风险理由。检测器 fail-closed 且不抛——不可解析的命令最多漏报。
+    return detectSensitiveGitAdd(rawCommand).some(h => h !== AGGREGATE_ADD_MARKER)
+      || detectSensitiveGitAdd(rewrittenCommand).some(h => h !== AGGREGATE_ADD_MARKER)
   },
 
   isConcurrencySafe: () => false,

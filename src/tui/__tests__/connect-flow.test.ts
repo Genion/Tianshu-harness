@@ -115,16 +115,22 @@ test('preset path: 6 steps — key → endpoint → connectivity → models → 
   if (probe.kind !== 'probe') return
   assert.equal(probe.baseUrl, PROVIDER_PRESETS.deepseek.provider.baseUrl)
   assert.equal(probe.apiKey, 'sk-test-123')
-  assert.equal(probe.probeModel, 'deepseek-v4-flash')
+  // 探测模型取自预设的 defaultModelId（connect-flow.ts 的 preset 分支）——断言常量
+  // 而非字面量：本用例测的是「6 步流转把预设默认模型带下去」，预设自身的取值由
+  // src/config/__tests__/manager-provider.test.ts 钉住。此前写死 'deepseek-v4-pro'
+  // 在 PR-4 把预设默认档改成 v4-flash 后成了漏跟的红（同测试的 baseUrl 一直用常量）。
+  assert.equal(probe.probeModel, PROVIDER_PRESETS.deepseek.defaultModelId)
 
   // [3/6] Connectivity report — right after the probe (narrative order).
-  assert.equal(flow.applyProbe(report({ models: ['deepseek-v4-pro'], latencyMs: 132 })).kind, 'next')
+  // 探测载荷含一个别名表认识的发现项（glm-5.2）——v4-pro 已随 75d9bb97c 回到
+  // deepseek 模板，不再是「发现项」，无法继续验证 ∪ 语义。
+  assert.equal(flow.applyProbe(report({ models: ['deepseek-v4-pro', 'glm-5.2'], latencyMs: 132 })).kind, 'next')
   const reportView = flow.view()
   assert.match(reportView.title, /连通性测试通过/)
   assert.equal(reportView.stepLabel, '步骤 3 / 6')
   const texts = (reportView.report ?? []).map(l => l.text)
   assert.ok(texts.some(t => /✔ 1\/3 检查端点连通性/.test(t)), 'checklist line 1')
-  assert.ok(texts.some(t => /✔ 2\/3 获取模型列表（1 个）/.test(t)), 'checklist line 2')
+  assert.ok(texts.some(t => /✔ 2\/3 获取模型列表（2 个）/.test(t)), 'checklist line 2')
   assert.ok(texts.some(t => /✔ 3\/3 发送最小推理请求（首字节 132ms）/.test(t)), 'checklist line 3')
 
   // [4/6] Model selection — preset templates checked by default.
@@ -132,12 +138,12 @@ test('preset path: 6 steps — key → endpoint → connectivity → models → 
   const modelsView = flow.view()
   assert.equal(modelsView.kind, 'multi-choice')
   assert.equal(modelsView.stepLabel, '步骤 4 / 6')
-  // 选项 = 预设模板 ∪ 探测新发现。模板列表随版本增删（2026-09 退役 v4-pro /
-  // vision-exp），从 preset 现值推导而非钉死——c6537d191 的语义化先例。
-  // 探测到的 v4-pro 官方档已退役、沦为「发现项」，但仍被别名表认识（代理
-  // fleet preset 仍携带），故非聚合 preset 下同样默认勾选。
+  // 选项 = 预设模板 ∪ 探测新发现。模板列表随版本增删，从 preset 现值推导而非
+  // 钉死——c6537d191 的语义化先例。v4-pro 已随 75d9bb97c 回到模板（官方撤销
+  // 退役），探测报告里的 v4-pro 与模板去重合并，不再是模板外的「发现项」；
+  // 此处探测须带一个真·发现项才能验证 ∪ 语义。
   const templateIds = PROVIDER_PRESETS.deepseek.provider.models.map(m => m.id)
-  assert.deepEqual(modelsView.options?.map(o => o.label), [...templateIds, 'deepseek-v4-pro'])
+  assert.deepEqual(modelsView.options?.map(o => o.label), [...templateIds, 'glm-5.2'])
   assert.deepEqual(modelsView.options?.map(o => o.checked), modelsView.options?.map(() => true))
   assert.match(modelsView.options?.[0]?.description ?? '', /预设/)
 
@@ -1480,10 +1486,11 @@ test('D1: aggregator preset defaults ALL models to unchecked (template + discove
   plain.submitChoice('deepseek')
   plain.submitInput('sk-x')
   plain.submitInput('')
-  plain.applyProbe(report({ models: ['deepseek-v4-pro'] }))
+  plain.applyProbe(report({ models: ['glm-5.2'] }))
   plain.submitChoice('continue')
   // 与上半的聚合「全不勾」对称：非聚合 preset 模板 ∪ 发现项全默认勾。
-  // 个数随 preset 增删变化（模板数 + 1 个发现项），钉长度语义不钉死数组。
+  // 发现项须是别名表认识的 id（glm-5.2）才默认勾选——v4-pro 已随 75d9bb97c
+  // 回到 deepseek 模板，不再是「发现项」；完全不认识的 id 默认不勾。
   const plainOpts = plain.view().options ?? []
   assert.equal(plainOpts.length, PROVIDER_PRESETS.deepseek.provider.models.length + 1)
   assert.deepEqual(plainOpts.map(o => o.checked), plainOpts.map(() => true))

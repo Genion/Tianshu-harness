@@ -6,6 +6,7 @@ import { parseRetryAfterMs } from './error-classifier.js'
 import { fetchWithTimeout } from './fetch-timeout.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
 import { parseJsonObjectWithEscapeRepair } from './json-escape-repair.js'
+import { normalizeBaseUrl } from './endpoint-map.js'
 import { ProxyAgent } from 'undici'
 import { acquireRateLimitSlot } from './rate-limiter.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
@@ -149,7 +150,7 @@ export class AnthropicClient implements StreamClient {
       }
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
-      const response = await fetchWithTimeout(`${this.config.baseUrl.replace(/\/+$/, '')}/v1/messages`, {
+      const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

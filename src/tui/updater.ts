@@ -595,8 +595,13 @@ export function withResumeArgs(argv: string[], sessionId?: string): string[] {
 export function restartProcess(sessionId?: string): void {
   const args = withResumeArgs(process.argv.slice(1), sessionId)
   const child = spawn(process.execPath, args, {
+    // Windows 上 detached 的子进程会拿到自己的可见控制台——Node 文档原话是
+    // 「The child will have its own console window」；本仓 2026-09-14 的 sidecar
+    // 事故（DETACHED 进程失去可继承的隐藏控制台 → 后代 spawn 弹窗）同源。
+    // 同文件 Windows 自更新启动器已是 detached + windowsHide 的组合，此处补齐。
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
   })
   child.unref()
   process.exit(0)

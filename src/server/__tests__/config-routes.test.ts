@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -608,7 +608,7 @@ describe('provider delete: preset-name deadlock', () => {
         default: 'deepseek',
         providers: {
           glm: { ...stub, name: 'glm' },
-          minimax: { ...stub, name: 'minimax' },
+          minimax: { ...stub, name: 'minimax', protocol: 'anthropic' },
           deepseek: { ...stub, name: 'deepseek' },
         },
       },
@@ -621,6 +621,10 @@ describe('provider delete: preset-name deadlock', () => {
     const names = (list.body as { providers: { name: string }[] }).providers.map(p => p.name)
     assert.equal(names[0], 'deepseek', `deepseek 必须排第一（got ${names.join(',')}）`)
     assert.ok(names.indexOf('glm') < names.indexOf('minimax'), 'glm 应排在 minimax 前（preset 原序）')
+    // protocol 透传到列表项——前端编辑 key/baseUrl 保存前的探测要据此发对鉴权头。
+    const byName = new Map((list.body as { providers: Array<{ name: string; protocol?: string }> }).providers.map(p => [p.name, p]))
+    assert.equal(byName.get('minimax')?.protocol, 'anthropic', '存储的 protocol 应透传到列表项')
+    assert.equal(byName.get('deepseek')?.protocol, 'openai')
   })
 
   it('DELETE /config/providers/:name still refuses the default provider', async () => {
@@ -1257,5 +1261,166 @@ describe('POST /config/providers/test (completion probe)', () => {
     assert.equal(typeof seenContent, 'string', 'vision:false 压制启发 → 纯文本 content')
     await server.close()
     server = undefined
+  })
+})
+
+describe('POST /config/providers/test-key — 探测走统一 probeProvider', () => {
+  const prevHome = process.env.RIVET_HOME
+  let home: string
+  let originalFetch: typeof global.fetch
+
+  before(() => {
+    home = mkdtempSync(join(tmpdir(), 'rivet-config-routes-testkey-'))
+    process.env.RIVET_HOME = home
+  })
+
+  after(() => {
+    if (prevHome === undefined) delete process.env.RIVET_HOME
+    else process.env.RIVET_HOME = prevHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  beforeEach(() => {
+    originalFetch = global.fetch
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+  })
+
+  function mockModelsResponse(body: unknown, status = 200) {
+    global.fetch = mock.fn(async () => new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch
+  }
+
+  it('keyless：无 apiKey 且无存储 key 时仍探测——本地端点返回 200+ok（Ollama/vLLM 无鉴权）', async () => {
+    writeConfig(home, { enabled: false, features: {} })
+    mockModelsResponse({ data: [{ id: 'local-model' }] })
+    const router = createRouter(buildConfigRoutes(TOKEN))
+
+    // 无 apiKey、provider 未配置（无存储 key）——keyless 探测应直接走（携带 baseUrl）。
+    const res = await router('POST', '/config/providers/test-key', {
+      provider: 'whatever',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+    }, AUTH)
+    assert.equal(res.status, 200, 'keyless 探测不应因缺 key 被 400')
+    assert.equal((res.body as { ok: boolean }).ok, true)
+    assert.deepEqual((res.body as { models: string[] }).models, ['local-model'])
+  })
+
+  it('携带 apiKey 时探测携带 Bearer 并回填 descriptors', async () => {
+    writeConfig(home, { enabled: false, features: {} })
+    let sentAuthorization: string | undefined
+    global.fetch = mock.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      sentAuthorization = headers.authorization ?? headers.Authorization
+      return new Response(JSON.stringify({ data: [{ id: 'deepseek-v4-pro' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+    const router = createRouter(buildConfigRoutes(TOKEN))
+
+    const res = await router('POST', '/config/providers/test-key', {
+      provider: 'deepseek',
+      apiKey: 'sk-x',
+      baseUrl: 'https://api.deepseek.com/v1',
+    }, AUTH)
+    assert.equal(res.status, 200)
+    assert.equal(sentAuthorization, 'Bearer sk-x')
+    const body = res.body as { ok: boolean; models: string[]; descriptors?: Array<{ id: string; contextWindow?: number }> }
+    assert.equal(body.ok, true)
+    assert.deepEqual(body.models, ['deepseek-v4-pro'])
+    assert.ok(body.descriptors && body.descriptors[0]?.contextWindow !== undefined, '已知模型回填 contextWindow')
+  })
+
+  it('识别 401 为 auth-failed', async () => {
+    writeConfig(home, { enabled: false, features: {} })
+    mockModelsResponse({ error: 'invalid api key' }, 401)
+    const router = createRouter(buildConfigRoutes(TOKEN))
+
+    const res = await router('POST', '/config/providers/test-key', {
+      provider: 'whatever',
+      apiKey: 'bad',
+      baseUrl: 'https://api.example.com/v1',
+    }, AUTH)
+    assert.equal(res.status, 200)
+    assert.equal((res.body as { ok: boolean; error: string }).ok, false)
+    assert.equal((res.body as { error: string }).error, 'auth-failed')
+  })
+
+  it('协议头透传：anthropic 探测不带 Authorization 而带 x-api-key', async () => {
+    writeConfig(home, { enabled: false, features: {} })
+    let sentAuth: string | undefined
+    let sentApiKey: string | undefined
+    global.fetch = mock.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      sentAuth = headers.authorization ?? headers.Authorization
+      sentApiKey = headers['x-api-key']
+      return new Response(JSON.stringify({ data: [{ id: 'claude-x' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+    const router = createRouter(buildConfigRoutes(TOKEN))
+
+    const res = await router('POST', '/config/providers/test-key', {
+      provider: 'whatever',
+      apiKey: 'sk-ant',
+      baseUrl: 'https://api.anthropic.com',
+      protocol: 'anthropic',
+    }, AUTH)
+    assert.equal(res.status, 200)
+    assert.equal(sentAuth, undefined, 'anthropic 协议不得携带 Authorization')
+    assert.equal(sentApiKey, 'sk-ant', 'anthropic 协议携带 x-api-key')
+  })
+})
+
+describe('POST /config/providers/match-models（纯本地匹配，零网络）', () => {
+  const prevHome = process.env.RIVET_HOME
+  let home: string
+
+  before(() => {
+    home = mkdtempSync(join(tmpdir(), 'rivet-match-models-'))
+    process.env.RIVET_HOME = home
+  })
+
+  after(() => {
+    if (prevHome === undefined) delete process.env.RIVET_HOME
+    else process.env.RIVET_HOME = prevHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('精确 / fuzzy / unknown 三态：保序、rawId 保留、fuzzy 透出 inferredIds', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const res = await router('POST', '/config/providers/match-models', {
+      ids: ['deepseek-v4-pro', 'deepseek-v4-flash-0731', 'zz-definitely-unknown-xyz'],
+    }, AUTH)
+    assert.equal(res.status, 200)
+    const body = res.body as {
+      ok: boolean
+      descriptors: Array<{ id: string; contextWindow?: number; maxTokens?: number }>
+      inferredIds: string[]
+    }
+    assert.equal(body.ok, true)
+    assert.deepEqual(
+      body.descriptors.map((d) => d.id),
+      ['deepseek-v4-pro', 'deepseek-v4-flash-0731', 'zz-definitely-unknown-xyz'],
+      'descriptors 与入参保序一一对应，rawId 原样返回',
+    )
+    assert.ok(typeof body.descriptors[0]?.contextWindow === 'number', '精确命中回填 contextWindow')
+    assert.equal(body.descriptors[2]?.contextWindow, undefined, '未知模型落裸骨架、不臆造元数据')
+    assert.deepEqual(body.inferredIds, ['deepseek-v4-flash-0731'], 'fuzzy 命中须透出供 UI 提示复核')
+  })
+
+  it('非法入参一律 400：非数组 / 空数组 / 空白串 / 非字符串元素', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const bad: unknown[] = [undefined, 'deepseek-v4-pro', [], ['   '], [1], ['ok', null], [{ id: 'x' }]]
+    for (const ids of bad) {
+      const res = await router('POST', '/config/providers/match-models', { ids }, AUTH)
+      assert.equal(res.status, 400, `ids=${JSON.stringify(ids)} 应 400`)
+    }
   })
 })

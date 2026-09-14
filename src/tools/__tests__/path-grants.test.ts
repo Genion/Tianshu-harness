@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -27,9 +27,22 @@ import { validatePathSafe } from '../path-validate.js'
 const SCRATCH = resolve('.rivet', 'scratch')
 mkdirSync(SCRATCH, { recursive: true })
 
+/** 本次运行创建的临时目录——after 钩子统一清理（台账 F3：此前从不清理，
+ *  `.rivet/scratch` 累积了 551 个 rivet-grants-* 空目录残留）。 */
+const createdTmpDirs: string[] = []
+
 function tmp(): string {
-  return mkdtempSync(join(SCRATCH, 'rivet-grants-'))
+  const dir = mkdtempSync(join(SCRATCH, 'rivet-grants-'))
+  createdTmpDirs.push(dir)
+  return dir
 }
+
+after(() => {
+  for (const dir of createdTmpDirs) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* best-effort */ }
+  }
+  createdTmpDirs.length = 0
+})
 
 /** Per-workspace grants store file for a cwd（与 path-grants.grantsFile 同规则）。 */
 function grantsStoreFile(cwd: string): string {

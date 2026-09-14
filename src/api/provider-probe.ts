@@ -63,12 +63,20 @@ export interface ProbedModelInfo {
   contextWindow?: number
   maxOutputTokens?: number
   maxReasoningTokens?: number
+  /** 该模型只出图（DashScope 的 `response_modality` 含 Image 而不含 Text）。
+   *  issue #8 §7.2：这类模型仍保留在列表里——否则用户在自己的模型列表里看不到它，
+   *  就无法在生图槽里选中。由消费方按此标记决定是否从 chat 选择器中隐藏。 */
+  supportsImageGen?: boolean
 }
 
 export interface ProbeReport {
   models: string[]
   /** GET /models returned a usable list. */
   modelsOk: boolean
+  /** 结构化 models 拉取错误——适配层（桌面 test-key）按 code 映射前端 i18n 键
+   *  （auth-failed/timeout/network-error/quota/http-<status>）。CLI 仍消费 errors
+   *  字符串，本字段是增量，不替代。 */
+  modelListError?: { code: string; status?: number; message: string }
   /** The minimal completion succeeded. */
   completionOk: boolean
   hints: CapabilityHints
@@ -155,6 +163,18 @@ function classifyHttpError(status: number, bodyText: string, baseUrl: string): s
 }
 
 /**
+ * classifyHttpError 的结构化 code 投影——前端 i18n 键（connect.probeError.*）
+ * 按 code 取值。分支优先级必须与 classifyHttpError 一致：quota body 判定先于
+ * 401/403（FreeTierOnly 是 403 但属账单问题，不是鉴权失败）。
+ */
+function modelListErrorCode(status: number, bodyText: string): string {
+  if (/quota|FreeTierOnly|insufficient|arrearage/i.test(bodyText)) return 'quota'
+  if (status === 401 || status === 403) return 'auth-failed'
+  if (status === 404) return 'http-404'
+  return `http-${status}`
+}
+
+/**
  * DashScope（百炼）原生模型列表形态：`{output: {models: [{model, model_info,
  * inference_metadata}]}}`——与 OpenAI 兼容形状的 `{data: [{id}]}` 完全不同，
  * 但带真实规格元数据（context_window / max_output_tokens / max_reasoning_tokens）。
@@ -170,18 +190,23 @@ function parseDashscopeNative(payload: unknown): { ids: string[]; infos: Record<
     const id = (item as { model?: unknown }).model
     if (typeof id !== 'string') continue
     const modalities = (item as { inference_metadata?: { response_modality?: unknown } }).inference_metadata?.response_modality
-    const textual = Array.isArray(modalities)
-      && modalities.some(m => m === 'Text' || m === 'Multimodal')
-    if (!textual) continue
+    const modalityList = Array.isArray(modalities) ? modalities : []
+    const textual = modalityList.some(m => m === 'Text' || m === 'Multimodal')
+    // issue #8 §7.2：生图模型（Image）不再丢弃——否则百炼用户在自己的模型列表里看不到
+    // 它，也就无法在生图槽里选它。纯音频/向量这类与天枢无关的产出仍然丢弃。是否展示交给
+    // 下游：chat 模型选择器按 supportsImageGen 隐藏，生图槽则据此列出。
+    const generatesImages = modalityList.some(m => m === 'Image')
+    if (!textual && !generatesImages) continue
     ids.push(id)
+    const info: ProbedModelInfo = {}
+    if (!textual && generatesImages) info.supportsImageGen = true
     const raw = (item as { model_info?: Record<string, unknown> }).model_info
     if (raw && typeof raw === 'object') {
-      const info: ProbedModelInfo = {}
       if (typeof raw.context_window === 'number') info.contextWindow = raw.context_window
       if (typeof raw.max_output_tokens === 'number') info.maxOutputTokens = raw.max_output_tokens
       if (typeof raw.max_reasoning_tokens === 'number') info.maxReasoningTokens = raw.max_reasoning_tokens
-      if (Object.keys(info).length > 0) infos[id] = info
     }
+    if (Object.keys(info).length > 0) infos[id] = info
   }
   return { ids, infos, rawCount: list.length }
 }
@@ -234,6 +259,8 @@ async function fetchDashscopeNativeModels(options: ProbeOptions): Promise<{ ids:
 interface FetchedModelList {
   ids: string[]
   infos?: Record<string, ProbedModelInfo>
+  /** models 拉取失败时的结构化错误（HTTP 分支）；超时/网络错误分支不带 status。 */
+  modelListError?: { code: string; status?: number; message: string }
 }
 
 async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<FetchedModelList> {
@@ -255,8 +282,9 @@ async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<
     }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
-      errors.push(`GET /models failed: ${classifyHttpError(response.status, bodyText, options.baseUrl)}`)
-      return { ids: [] }
+      const message = classifyHttpError(response.status, bodyText, options.baseUrl)
+      errors.push(`GET /models failed: ${message}`)
+      return { ids: [], modelListError: { code: modelListErrorCode(response.status, bodyText), status: response.status, message } }
     }
     const payload = await response.json() as unknown
     const ids = parseModelIds(payload)
@@ -266,8 +294,9 @@ async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<
     const reason = error instanceof Error && error.name === 'AbortError'
       ? `timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
+    const code = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network-error'
     errors.push(`GET /models failed: ${reason}`)
-    return { ids: [] }
+    return { ids: [], modelListError: { code, message: reason } }
   }
 }
 
@@ -439,6 +468,7 @@ export async function probeProvider(options: ProbeOptions): Promise<ProbeReport>
     completionOk: false,
     hints: {},
     errors,
+    ...(fetched.modelListError ? { modelListError: fetched.modelListError } : {}),
     ...(fetched.infos ? { modelInfos: fetched.infos } : {}),
   }
 

@@ -175,7 +175,7 @@ test('Ctrl+C with image attachments: keeps images, enters exit-confirm', async (
   assert.ok(pending > 0, '进入退出确认窗口')
 })
 
-test('Ctrl+C with text+images: keeps both, shows exit-confirm hint (no restore hint)', async () => {
+test('Ctrl+C with text+images: clears draft but keeps images, no exit-confirm window', async () => {
   const { app, out, stdin } = makeApp()
   app.start()
   ;(app as any).lastInputFocusAt = Date.now() - 2_000
@@ -185,8 +185,9 @@ test('Ctrl+C with text+images: keeps both, shows exit-confirm hint (no restore h
   stdin.dataHandler!('\x03') // Ctrl+C
   await tick(20)
 
-  assert.equal(app.getInputValue(), 'hi', '文本保留，不被清空')
-  assert.equal((app as any).getInputImagesCount(), 1, '图片保留')
-  assert.ok(!out.chunks.join('').includes('Ctrl+Z to restore'), '无清空恢复提示（不再清空）')
-  assert.ok(out.chunks.join('').includes('再次按 Ctrl+C 退出'), '显示退出确认提示')
+  // fa2c971f0 起：空闲 + 有输入 → 清空草稿、不进退出确认（清空只作用于文本）
+  assert.equal(app.getInputValue(), '', '有输入时清空草稿')
+  assert.equal((app as any).getInputImagesCount(), 1, '图片保留（清空只作用于文本，不误删附件）')
+  assert.equal((app as any).inputController.ctrlCPendingSince, 0, '有输入时不进退出确认窗口')
+  assert.ok(!out.chunks.join('').includes('再次按 Ctrl+C 退出'), '不显示退出确认提示')
 })

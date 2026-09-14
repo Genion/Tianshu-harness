@@ -29,6 +29,7 @@ import type { IntentPreview } from '../agent/intent-preview.js'
 import { describeIntentNote } from '../agent/intent-preview.js'
 import type { Artifact } from '../artifact/types.js'
 import { ArtifactStore } from '../artifact/store.js'
+import { refreshAgentTools as refreshAgentToolsImpl } from './agent-tool-refresh.js'
 import type { OaiMessage } from '../api/oai-types.js'
 import { isAssistantWithTools, oaiMessageText, type OaiToolCall } from '../api/oai-types.js'
 import { buildUserAnchors, stripInjectedSuffix } from './rewind-anchors.js'
@@ -95,8 +96,10 @@ import type {
   SessionRecord,
   ResolvedDomainRecord,
   PlanDraft,
+  ZenPhaseMirror,
 } from './protocol.js'
 import { redactValue, redactText, truncateUtf16Safe } from './redact.js'
+import { contractModels } from '../config/contract-models.js'
 
 // The session wire contract (event types, records, statuses) lives in
 // protocol.ts so the desktop can share it type-only. Re-export so existing
@@ -162,6 +165,11 @@ export interface ModelOption {
   contextWindow?: number
   /** 擅长场景 — 预设定义处填充，透传到桌面模型选择器。 */
   description?: string
+  /** 多 key：条目所属 key 的稳定 id（serve.listAllModels 逐 key 生成时带上）。
+   *  current 判定据此精确到 key——缺它则同 provider 双 key 挂同 wire id 时无法区分。 */
+  keyId?: string
+  /** 多 key：用户给 key 起的名称（未起名缺省）。 */
+  keyLabel?: string
 }
 
 /** PlusMenu — a model option annotated with whether it's the session's current. */
@@ -751,6 +759,13 @@ export interface RuntimeSessionManagerOptions {
   }
   /** Injectable async plan listing for deterministic lifecycle tests. */
   listPlans?: typeof storeListPlans
+  /**
+   * 阶段 4 全局推送通道——会话列表可能变化时的失效提示回调。触发点：记录落盘
+   * （状态 / 标题 / 模型 / 域…）、硬删除、审批计数变化、updatedAt 触碰。回调
+   * 只表达「列表该重取了」，不带记录本体；serve.ts 接到 ServerEventBus 合并后
+   * 经 GET /events 推给桌面端。未接线（测试 / 老入口）时为空操作。
+   */
+  onSessionsChanged?: (reason: string) => void
 }
 
 type InterventionKind = 'approval'
@@ -1176,6 +1191,8 @@ export class RuntimeSessionManager {
   private readonly loadPlans: typeof storeListPlans
   /** P1 任务身份化 — 可选 Mission 存储（未注入时 Mission 关联整体跳过）。 */
   private readonly missionStore?: MissionStore
+  /** 阶段 4 — 会话列表失效提示回调（见 RuntimeSessionManagerOptions.onSessionsChanged）。 */
+  private readonly onSessionsChanged?: (reason: string) => void
   private idleSweepTimer?: ReturnType<typeof setInterval>
   /** Per-session coordinator refs for worker steer/kill (set by main.ts after agent build). */
   private readonly coordinatorBySession = new Map<string, () => import('../agent/coordinator.js').DelegationCoordinator | undefined>()
@@ -1219,6 +1236,7 @@ export class RuntimeSessionManager {
     }
     this.loadPlans = opts.listPlans ?? storeListPlans
     this.missionStore = opts.missionStore
+    this.onSessionsChanged = opts.onSessionsChanged
     if (this.idleAgentTtlMs > 0) {
       // Sweep once a minute; unref so the timer never keeps the process alive.
       this.idleSweepTimer = setInterval(() => this.sweepIdleAgents(), 60_000)
@@ -1647,6 +1665,15 @@ export class RuntimeSessionManager {
   }
 
   /**
+   * 禅相位镜像（/stream 建连补发用，同 replay_window / job_snapshot 的 seq=0
+   * 合成事件语义）。undefined = 会话不存在或从未收到相位变化（禅未启用）。
+   * 由 onZenPhaseChange 写入并随 record 落 index.json，sidecar 重启后仍在。
+   */
+  getZenPhaseMirror(id: string): ZenPhaseMirror | undefined {
+    return this.sessions.get(id)?.record.zenPhaseMirror
+  }
+
+  /**
    * 冷通道历史分页：绕过内存环直读磁盘日志（复用 loadEventsAsync 的
    * off-thread parse），返回 seq < before 的最后 ~limit 条，并向前扩展到
    * 最近的 user 事件对齐 turn 边界——前端独立 fold 一页再前插的正确性
@@ -1925,6 +1952,7 @@ export class RuntimeSessionManager {
     try { this.persistence?.deleteSession?.(id) } catch { /* best-effort */ }
     // Permanently destroyed — never rebuilds, so drop stores unconditionally.
     this.forgetStores(id)
+    this.notifySessionsChanged('delete')
     return true
   }
 
@@ -2139,7 +2167,11 @@ export class RuntimeSessionManager {
       const projectDomain = projectConfig.agent?.defaultDomain
       if (projectDomain) sessionDomain = projectDomain
       const projectProvider = projectConfig.provider.providers[projectConfig.provider.default]
-      if (projectProvider?.models[0]?.id) sessionModel = projectProvider.models[0].id
+      // 多 key：走 keys 池派生（contractModels）——顶层 models 是迁移时的快照。
+      if (projectProvider) {
+        const sessionPool = contractModels(projectProvider)
+        if (sessionPool[0]?.id) sessionModel = sessionPool[0].id
+      }
     } catch { /* project config load failure is non-fatal — fall back to global defaults */ }
     if (input.model) sessionModel = input.model
     if (input.domain) sessionDomain = input.domain
@@ -2933,15 +2965,24 @@ export class RuntimeSessionManager {
     if (!session) return undefined
     const current = session.record.model
     const all = this.listModelsFn?.() ?? []
+    // 多 key：记录形态三态——三段式 provider:keyId:modelId（新切换产物）精确到 key；
+    // 两段式 / 裸 id（旧会话、未迁移 provider）兜底匹配。兜底分支多个条目同时命中时
+    // （同 provider 双 key 挂同 wire id）首个匹配胜出——对齐 resolveModelSpec「扫首个
+    // 命中」的实际语义；否则两条都标 current，桌面端对 current 早退，用户两条都点不
+    // 动、无法再换 key（resume 也会静默用首个账号）。
+    let claimed = false
     return all.map((m) => {
-      const ref = `${m.provider}:${m.id}`
-      const currentFlag = !!current && (
-        current === ref
+      const keyedRef = m.keyId ? `${m.provider}:${m.keyId}:${m.id}` : null
+      const keyedAlias = m.keyId ? `${m.provider}:${m.keyId}:${m.alias}` : null
+      const hit = !!current && !claimed && (
+        (keyedRef !== null && (current === keyedRef || current === keyedAlias))
+        || current === `${m.provider}:${m.id}`
         || current === `${m.provider}:${m.alias}`
         || current === m.id
         || current === m.alias
       )
-      return { ...m, current: currentFlag }
+      if (hit) claimed = true
+      return { ...m, current: hit }
     })
   }
 
@@ -3150,6 +3191,9 @@ export class RuntimeSessionManager {
    * ensureAgent 的磁盘新鲜值兜底）。沙箱 env 联动由 PUT 路由侧统一处理，
    * 此处不重复。返回实际套用的会话数（遥测/测试用）。
    */
+  /** 影响工具表的配置落盘后刷新存活 agent（issue #8 生图槽；逻辑见 agent-tool-refresh.ts）。 */
+  refreshAgentTools(): number { return refreshAgentToolsImpl(this.sessions.values()) }
+
   applyGlobalApprovalMode(mode: ApprovalMode): number {
     this.globalApprovalMode = mode
     let applied = 0
@@ -3779,7 +3823,11 @@ export class RuntimeSessionManager {
     session.steer.clear()
     const sections: string[] = steerEntries.map((e) => e.text)
     if (laneQueued.length > 0) {
-      sections.push(`${QUEUE_LANE_MERGE_HEADER}\n${laneQueued.map((e) => e.text).join('\n\n')}`)
+      // 上一轮被用户打断（status='aborted'）：排队消息是打断后的新指示，
+      // 「一并处理」会诱导模型接着做被叫停的事——换头（两处调用点都在
+      // status 翻 'running' 前归并，规则内聚在本函数里）。
+      const header = session.record.status === 'aborted' ? QUEUE_LANE_MERGE_HEADER_AFTER_ABORT : QUEUE_LANE_MERGE_HEADER
+      sections.push(`${header}\n${laneQueued.map((e) => e.text).join('\n\n')}`)
       for (const entry of laneQueued) {
         entry.status = 'merged'
         this.append(session, 'queue_status', { laneId: entry.id, status: 'merged' })
@@ -4170,6 +4218,33 @@ export class RuntimeSessionManager {
       this.persistRecord(s)
     }
     return true
+  }
+
+  /**
+   * Stop → settle window. abort()/archive flip record.status to 'aborted' and
+   * emit the status event synchronously, but `running` stays true until the
+   * agent loop unwinds (stream teardown / postTurn hooks) and run()'s finally
+   * appends `done`. Every client-visible idle signal (GET /sessions/:id, the
+   * sessions list, SSE status) fires inside that window, so a rewind/prompt
+   * issued right after Stop hit the `running` guard → 409（桌面端编辑重发先
+   * abort 再轮询 GET 到非 running 即 rewind，用户看到「保存失败：Session is
+   * running」）. Resolves true once the run has settled (or none is running);
+   * false when still running after timeoutMs, or when nobody asked the run to
+   * stop (record.status still 'running') — waiting there would only delay the
+   * same 409 the caller gets today.
+   */
+  async waitForRunSettled(id: string, timeoutMs = 10_000): Promise<boolean> {
+    const s = this.sessions.get(id)
+    if (!s) return false
+    if (!s.running) return true
+    const settlement = s.activeRunSettlement
+    if (s.record.status === 'running' || !settlement) return false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      settlement.promise,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs) }),
+    ]).finally(() => { if (timer) clearTimeout(timer) })
+    return !s.running
   }
 
   abortAll(): void {
@@ -5204,6 +5279,26 @@ export class RuntimeSessionManager {
         session.record.currentPhase = phase
         this.append(session, 'phase', { phase, ...detail })
       },
+      // Zen Mode（禅模式）相位镜像：run 开始与每次晋升各发一次。桌面端订阅
+      // /stream 的 zen_phase 折叠相位徽章（desktop/src/state/event-reducer.ts）；
+      // TUI 徽章另走 zenBadgeProvider 回调，不经过此事件。
+      // worker/子代理会话不接 zen（loop 侧 isTopLevel=false 不 arm），不触发。
+      onZenPhaseChange: (phase, reason, stats) => {
+        if (!isActive()) return
+        // armed/zenTurns 恒带（契约里非可选）：record 镜像与事件共用同一形状，
+        // 消费端不必再分辨「字段缺失」与「值为 false/0」两种缺失语义。
+        const mirror: ZenPhaseMirror = {
+          phase,
+          ...(reason !== undefined ? { reason } : {}),
+          armed: stats?.armed === true,
+          zenTurns: typeof stats?.zenTurns === 'number' ? stats.zenTurns : 0,
+        }
+        this.append(session, 'zen_phase', mirror)
+        // 同步进 record 并落盘：/stream 建连时按它补发（见 protocol.ts 的
+        // zenPhaseMirror 注释）——zen_phase 滑出回放窗口后，重连的唯一来源。
+        session.record.zenPhaseMirror = mirror
+        this.persistRecord(session)
+      },
       // R5 — structured course-correction → its own event so the desktop can
       // render a "改道" card inline (selective externalization of star-domain).
       onDecisionShift: (shift: DecisionShift) => {
@@ -5518,7 +5613,11 @@ export class RuntimeSessionManager {
   private recountApprovals(session: InternalSession): void {
     let count = 0
     for (const p of session.pending.values()) if (p.kind === 'approval') count++
+    const changed = session.record.pendingApprovals !== count
     session.record.pendingApprovals = count
+    // 审批计数是跨会话 OS 通知的触发字段（use-global-notifications 按列表 diff）
+    // ——变化即推，不等下一次兜底轮询。
+    if (changed) this.notifySessionsChanged('approvals')
   }
 
   /**
@@ -5841,11 +5940,26 @@ export class RuntimeSessionManager {
   }
 
   private persistRecord(session: InternalSession): void {
-    if (!this.persistence || !this.ownsSessionDurability(session)) return
+    if (!this.ownsSessionDurability(session)) return
+    // 记录级变化（状态 / 标题 / 模型 / 域 / 审批计数…）就是「会话列表该重取了」
+    // 的定义——先于落盘发提示，无持久化的 ephemeral 实例也能推。
+    this.notifySessionsChanged('record')
+    if (!this.persistence) return
     try {
       this.persistence.saveRecord({ ...session.record })
     } catch {
       // non-fatal — events.jsonl is the source of truth for replay
+    }
+  }
+
+  /** 阶段 4 — 会话列表失效提示。回调异常不得影响调用方（列表推送只是加速，
+   *  兜底轮询仍在）。 */
+  private notifySessionsChanged(reason: string): void {
+    if (!this.onSessionsChanged) return
+    try {
+      this.onSessionsChanged(reason)
+    } catch {
+      // observer failure must never break the session lifecycle
     }
   }
 
@@ -5878,6 +5992,9 @@ export class RuntimeSessionManager {
 
   private touch(session: InternalSession): void {
     session.record.updatedAt = this.now()
+    // updatedAt 决定列表排序；未配对 persistRecord 的触碰（队列 lane、委派、
+    // skills 切换）也让列表重取。总线侧合并，不会放大。
+    this.notifySessionsChanged('touch')
   }
 }
 
@@ -5890,6 +6007,10 @@ function randomId(): string {
 
 /** Phase 2 — queue lane 条目归并进新 prompt 时 lane 部分的小节头。 */
 const QUEUE_LANE_MERGE_HEADER = '[排队跟进 — 上轮运行期间排队，请一并处理]'
+
+/** 上一轮被用户打断（Stop）时必须换的归并头：排队消息是打断后的新指示，
+ *  不是对被叫停任务的补充——旧头「请一并处理」会诱导模型接着做被叫停的事。 */
+const QUEUE_LANE_MERGE_HEADER_AFTER_ABORT = '[排队跟进 — 上轮已被用户打断，以下是打断后的新指示，请以此为准]'
 
 /** Parse a `data:image/<mime>;base64,<payload>` URL. Returns null if malformed. */
 function parseImageDataUrl(url: string): { mime: string; base64: string } | null {

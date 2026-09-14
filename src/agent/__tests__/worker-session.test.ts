@@ -11,6 +11,7 @@ import { ToolRegistry } from '../../tools/registry.js'
 import { SessionContext } from '../context.js'
 import { createReadOnlyWorkOrder, deriveWorkerSessionId, type WorkOrder } from '../work-order.js'
 import { SessionPersist } from '../session-persist.js'
+import { isTruncationStopReason } from '../worker-repair-route.js'
 import {
   runWorkerSession,
   createSoftLandingDrain,
@@ -567,6 +568,7 @@ describe('worker finalization turn (B：终轮定型)', () => {
     tools?: unknown
     tool_choice?: unknown
     response_format?: unknown
+    max_tokens?: number
   }
 
   type ScriptEntry = string | { toolUse: { id: string; name: string; input: Record<string, unknown> } }
@@ -666,6 +668,31 @@ describe('worker finalization turn (B：终轮定型)', () => {
       nextActions: [],
     }
   }
+
+  it('收尾轮 max_tokens 取报告档：未声明 = 16384；显式档（format_checker 4096）不被改写', async () => {
+    // 审查补遗（0926f5b8d）：「报告实际拿到多少预算」原先只在工厂层有断言
+    // （work-order.test.ts），消费端三处实参被改写不会变红——这里钉生产端实际值。
+    const scoutReport =
+      '{"workOrderId":"wo_budget_scout","status":"passed","summary":"报告档探针","findings":[],"artifacts":[],"changedFiles":[],"risks":[],"nextActions":[]}'
+    const c1 = capturingClient(['prose only', scoutReport])
+    await runWorkerSession(finalizeConfig(scoutOrder('wo_budget_scout'), c1.client))
+    assert.equal(c1.requests[1]?.max_tokens, 16384, '未声明档（code_scout）收尾轮应发报告档 16384')
+    assert.equal(c1.requests[2]?.max_tokens, 16384, '无工具 fallback 轮同档')
+
+    const fmtOrder = createReadOnlyWorkOrder({
+      id: 'wo_budget_fmt',
+      parentTurnId: 'turn_1',
+      kind: 'review',
+      profile: 'format_checker',
+      objective: 'probe format budget',
+      scope: {},
+    })
+    const fmtReport =
+      '{"workOrderId":"wo_budget_fmt","status":"passed","summary":"报告档探针","findings":[],"artifacts":[],"changedFiles":[],"risks":[],"nextActions":[]}'
+    const c2 = capturingClient(['prose only', fmtReport])
+    await runWorkerSession(finalizeConfig(fmtOrder, c2.client))
+    assert.equal(c2.requests[1]?.max_tokens, 4096, '显式档（format_checker）不被兜底改写')
+  })
 
   it('探索后发起终型轮：带完整会话历史、无 tools、json_object 随 forceJsonRepair', async () => {
     const order = scoutOrder('wo_fin')
@@ -1040,6 +1067,74 @@ describe('worker finalization turn (B：终轮定型)', () => {
     assert.equal(requests.length, 2, '工具路径成功（reconcile 不触发 fallback）')
     assert.equal(run.result.evidenceStatus, 'unverified', '自报 verified 但 changedFiles 无工具调用痕迹 → 对账降级，证据门未被绕过')
     assert.ok(run.result.risks.some((r) => String(r).includes('src/fabricated.ts')), '无痕迹文件被记 risk')
+  })
+})
+
+/** 收尾轮截断（2026-09-13 两例 review worker json_parse 事故）——
+ *  长报告在 max_tokens 处被截断成未闭合 JSON，parse 必失败；截断这一
+ *  真实原因必须透传到失败结果的 risks，而不是被 salvage 的笼统 summary 吞掉。 */
+describe('finalize truncation (2026-09-13 json_parse 事故)', () => {
+  it('isTruncationStopReason：mapFinishReason 归一的截断值命中，其余不误报', () => {
+    assert.equal(isTruncationStopReason('max_tokens'), true) // openai finish_reason='length' 的归一值
+    assert.equal(isTruncationStopReason('length'), true) // 原始 finish_reason 直通也认
+    assert.equal(isTruncationStopReason('end_turn'), false)
+    assert.equal(isTruncationStopReason('tool_use'), false)
+    assert.equal(isTruncationStopReason(undefined), false)
+  })
+
+  it('收尾轮被 max_tokens 截断 → 失败结果带截断标记（事故现场回归）', async () => {
+    const order = createReadOnlyWorkOrder({
+      id: 'wo_trunc',
+      parentTurnId: 'turn_1',
+      kind: 'review',
+      profile: 'reviewer',
+      objective: 'Review a report that overflows the output budget.',
+      scope: {},
+      budget: { maxRetries: 0 },
+    })
+    // 未闭合的长报告：首条 finding 完整可打捞，尾部在 max_tokens 处断开
+    const truncatedJson =
+      '{"workOrderId":"wo_trunc","status":"passed","summary":"长报告","findings":[' +
+      '{"claim":"缺陷一","evidence":"src/a.ts:1","confidence":"high"},{"claim":"缺陷'
+    let call = 0
+    const client = {
+      stream: mock.fn(async (_req: unknown, cb: StreamCallbacks) => {
+        call++
+        if (call === 1) {
+          // 探索轮：无 JSON 散文
+          cb.onTextDelta('Let me read the diff first.')
+          cb.onContentBlock(textBlock('Let me read the diff first.'))
+          cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 5 })
+          return
+        }
+        if (call === 2) {
+          // 终型阶段 1（submit_result 工具轮）：零 tool-call → 回退阶段 2
+          cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 5 })
+          return
+        }
+        // 终型阶段 2：输出在 max_tokens 处被截断
+        cb.onTextDelta(truncatedJson)
+        cb.onContentBlock(textBlock(truncatedJson))
+        cb.onStopReason('max_tokens', { input_tokens: 10, output_tokens: 4096 })
+      }),
+    } as unknown as StreamClient
+
+    const run = await runWorkerSession({
+      order,
+      client,
+      promptEngine: makePromptEngine(),
+      toolRegistry: new ToolRegistry(),
+      cwd: '/repo',
+      maxTurns: 2,
+      contextWindow: 1_000_000,
+      compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' },
+    })
+
+    assert.notEqual(run.result.status, 'passed')
+    assert.ok(
+      run.result.risks.some(r => /truncated at max_tokens/i.test(r)),
+      `截断事实必须出现在 risks（实际 ${JSON.stringify(run.result.risks)}）`,
+    )
   })
 })
 
