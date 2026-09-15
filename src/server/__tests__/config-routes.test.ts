@@ -1262,6 +1262,67 @@ describe('POST /config/providers/test (completion probe)', () => {
     await server.close()
     server = undefined
   })
+
+  it('A′ keys-pool provider without explicit apiKey probes with the stored key (not 400)', async () => {
+    // A′ 迁移后的主流形态：key 在 provider-keys.json 的 keys[] 池里
+    // （keyRef 指向 secrets.json），provider 顶层槽位（keyRef/apiKey/apiKeyEnv）
+    // 全空。「测试模型调用」不带显式 apiKey 时应回退解析 keys 池的凭据，
+    // 而不是 400 'apiKey is required'——那是用户视角的「按钮没反馈」。
+    const home2 = mkdtempSync(join(tmpdir(), 'rivet-provider-test-a1-'))
+    const prevHome2 = process.env.RIVET_HOME
+    process.env.RIVET_HOME = home2
+    try {
+      rmSync(join(home2, 'provider-keys.json'), { force: true })
+      writeFileSync(join(home2, 'config.json'), JSON.stringify({
+        provider: {
+          default: 'multi-key-ov',
+          providers: {
+            'multi-key-ov': {
+              name: 'multi-key-ov',
+              label: 'Multi Key OV',
+              baseUrl: 'http://127.0.0.1:1/v1', // 占位，探测时 body.baseUrl 覆盖
+              keys: [{ id: 'k_probe', keyRef: 'multi-key-ov:k_probe', models: [{ id: 'pool-model' }] }],
+              models: [],
+            },
+          },
+        },
+      }, null, 2) + '\n')
+      writeSecret('multi-key-ov:k_probe', 'sk-pool-key', home2)
+
+      let seenAuth: string | undefined
+      let saw = false
+      server = await startProbeServer((req, res) => {
+        if (req.url === '/v1/models') {
+          seenAuth = req.headers.authorization
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ data: [{ id: 'pool-model' }] }))
+          return
+        }
+        if (req.url === '/v1/chat/completions') {
+          saw = true
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          res.end(sseProbeBody([JSON.stringify({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] })]))
+          return
+        }
+        res.writeHead(404).end()
+      })
+      const router = createRouter(buildConfigRoutes(TOKEN))
+      const res = await router('POST', '/config/providers/test', {
+        provider: 'multi-key-ov', baseUrl: server.baseUrl, protocol: 'openai', model: 'pool-model',
+      }, AUTH)
+      const body = res.body as { ok?: boolean; error?: string }
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${body.error ?? ''}`)
+      assert.equal(body.ok, true, 'keys 池凭据回填后探测应成功')
+      assert.equal(seenAuth, 'Bearer sk-pool-key', '探测请求应带 keys 池里存储的 key')
+      assert.equal(saw, true, 'completion 真测应发出')
+      await server.close()
+      server = undefined
+    } finally {
+      if (prevHome2 === undefined) delete process.env.RIVET_HOME
+      else process.env.RIVET_HOME = prevHome2
+      rmSync(home2, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('POST /config/providers/test-key — 探测走统一 probeProvider', () => {
@@ -1422,5 +1483,89 @@ describe('POST /config/providers/match-models（纯本地匹配，零网络）',
       const res = await router('POST', '/config/providers/match-models', { ids }, AUTH)
       assert.equal(res.status, 400, `ids=${JSON.stringify(ids)} 应 400`)
     }
+  })
+})
+
+// ── issue #147：工作区配置读写（默认工作区 + 临时会话隔离根）────────────────
+
+describe('workspace routes (issue #147)', () => {
+  const prevHome = process.env.RIVET_HOME
+  const prevConfigPath = process.env.RIVET_CONFIG_PATH
+  let home: string
+
+  before(() => {
+    home = mkdtempSync(join(tmpdir(), 'rivet-ws-routes-'))
+    process.env.RIVET_HOME = home
+    process.env.RIVET_CONFIG_PATH = join(home, 'config.json')
+  })
+
+  after(() => {
+    if (prevHome === undefined) delete process.env.RIVET_HOME
+    else process.env.RIVET_HOME = prevHome
+    if (prevConfigPath === undefined) delete process.env.RIVET_CONFIG_PATH
+    else process.env.RIVET_CONFIG_PATH = prevConfigPath
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('GET 未配置时两个字段都是 null，scratchRoot 指向 <rivetHome>/workspace', async () => {
+    writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({ provider: { default: 'deepseek', providers: {} } }, null, 2))
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const res = await router('GET', '/config/workspace', {}, AUTH)
+    assert.equal(res.status, 200)
+    const body = res.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
+    assert.equal(body.defaultDir, null)
+    assert.equal(body.scratchDir, null)
+    assert.equal(body.scratchRoot, join(home, 'workspace'))
+  })
+
+  it('PUT 写入后 GET 回读一致，且落盘到 user config.json', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const put = await router('PUT', '/config/workspace', { defaultDir: '/work/default', scratchDir: '/work/scratch' }, AUTH)
+    assert.equal(put.status, 200)
+    const putBody = put.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
+    assert.equal(putBody.defaultDir, '/work/default')
+    // scratchDir 已配 → scratchRoot 跟随它（桌面端展示的「临时会话落点」）。
+    assert.equal(putBody.scratchRoot, '/work/scratch')
+
+    const getRes = await router('GET', '/config/workspace', {}, AUTH)
+    assert.deepEqual(getRes.body, put.body)
+
+    const raw = JSON.parse(readFileSync(process.env.RIVET_CONFIG_PATH!, 'utf-8')) as { workspace?: { defaultDir?: string } }
+    assert.equal(raw.workspace?.defaultDir, '/work/default', '必须落到 config.json 的 workspace 段')
+  })
+
+  it('PUT 只传单字段 = 部分更新，未传字段保留（审查跟进 2026-09-15）', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    await router('PUT', '/config/workspace', { defaultDir: '/work/default', scratchDir: '/work/scratch' }, AUTH)
+    // 桌面设置页每个控件独立提交——只改默认工作区不得顺带清掉隔离根
+    // （scratchDir 无 UI 编辑入口，被清掉无法自助恢复）。
+    const put = await router('PUT', '/config/workspace', { defaultDir: '/work/next' }, AUTH)
+    assert.equal(put.status, 200)
+    const body = put.body as { defaultDir: string | null; scratchDir: string | null }
+    assert.equal(body.defaultDir, '/work/next')
+    assert.equal(body.scratchDir, '/work/scratch', '未传的字段必须保留（整体替换会静默清掉它）')
+  })
+
+  it('PUT 空白字符串 / null = 清除字段（回到旧行为）', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const put = await router('PUT', '/config/workspace', { defaultDir: '   ', scratchDir: null }, AUTH)
+    assert.equal(put.status, 200)
+    const body = put.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
+    assert.equal(body.defaultDir, null)
+    assert.equal(body.scratchDir, null)
+    assert.equal(body.scratchRoot, join(home, 'workspace'))
+  })
+
+  it('PUT 非字符串 → 400（不静默保存失败值）', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const res = await router('PUT', '/config/workspace', { defaultDir: 123 }, AUTH)
+    assert.equal(res.status, 400)
+    assert.match(String((res.body as { error: string }).error), /defaultDir/)
+  })
+
+  it('无 Bearer token → 401（fail-closed）', async () => {
+    const router = createRouter(buildConfigRoutes(TOKEN))
+    const res = await router('GET', '/config/workspace', {}, {})
+    assert.equal(res.status, 401)
   })
 })

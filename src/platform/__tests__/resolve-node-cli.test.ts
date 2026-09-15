@@ -98,4 +98,51 @@ describe('buildStdioEnvWithNodePath', () => {
     })
     assert.ok(env.PATH?.startsWith(join('/opt', 'node', 'bin') + ':'))
   })
+
+  // ── issue #149：基座 PATH 缺失时的静默退化 ──────────────────────────
+  // 旧实现 `PATH: pathRest ? nodeDir+sep+pathRest : nodeDir` 在基座给不出 PATH 时
+  // 只留 node 目录。npx 解析包要 spawn cmd.exe，它不在 node 目录里——子进程秒退，
+  // 报出来只是 -32000，看不出根因。
+
+  it('基座 PATH 缺失时补系统目录，而不是只剩 nodeDir', () => {
+    const env = buildStdioEnvWithNodePath(undefined, {
+      execPath: 'C:\\app\\node.exe',
+      platform: 'win32',
+      // MCP SDK 1.29.0 之前的 win32 白名单就是这样：有 SYSTEMROOT 没有 PATH。
+      getDefaultEnvironment: () => ({ SYSTEMROOT: 'C:\\Windows' }),
+    })
+    assert.equal(
+      env.PATH,
+      'C:\\app;C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem',
+      'PATH 只剩 node 目录时 npx 找不到 cmd.exe',
+    )
+  })
+
+  it('兜底读 SystemRoot，不硬写 C:\\Windows（系统装在非 C 盘时硬写等于没兜底）', () => {
+    const env = buildStdioEnvWithNodePath(undefined, {
+      execPath: 'D:\\app\\node.exe',
+      platform: 'win32',
+      getDefaultEnvironment: () => ({ SYSTEMROOT: 'D:\\Win' }),
+    })
+    assert.ok(env.PATH?.includes('D:\\Win\\System32'))
+    assert.ok(!env.PATH?.includes('C:\\Windows'))
+  })
+
+  it('基座 PATH 正常时不追加兜底目录（行为与改动前逐字一致）', () => {
+    const env = buildStdioEnvWithNodePath(undefined, {
+      execPath: 'C:\\app\\node.exe',
+      platform: 'win32',
+      getDefaultEnvironment: () => ({ PATH: 'C:\\Windows\\System32', SYSTEMROOT: 'C:\\Windows' }),
+    })
+    assert.equal(env.PATH, 'C:\\app;C:\\Windows\\System32')
+  })
+
+  it('POSIX 不猜系统目录——基座缺 PATH 时宁可只给 nodeDir', () => {
+    const env = buildStdioEnvWithNodePath(undefined, {
+      execPath: '/opt/node/bin/node',
+      platform: 'linux',
+      getDefaultEnvironment: () => ({}),
+    })
+    assert.equal(env.PATH, '/opt/node/bin')
+  })
 })

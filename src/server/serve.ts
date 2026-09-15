@@ -20,6 +20,7 @@ import { buildMissionRoutes } from './mission-routes.js'
 import { buildRemoteInfoRoutes } from './remote-info-routes.js'
 import { MissionStore } from './mission-store.js'
 import { buildHealthRoute, createHealthSnapshot } from './health-route.js'
+import { buildAccountRoutesFor } from './account-routes.js'
 import { ServerEventBus } from './server-event-bus.js'
 import { SseConnectionRegistry } from './sse-registry.js'
 import { buildServerEventsRoute } from './server-events-route.js'
@@ -722,7 +723,12 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     try {
       const { McpManager } = await import('../mcp/manager.js')
       const liveMcp = loadConfig().mcp
-      const mgr = new McpManager(liveMcp)
+      // onToolsChanged：自动重连恢复后把工具面推回会话。宿主侧是主动推送语义
+      // （injectMcpTools 只覆盖已有 live agent 的会话，新建 agent 才会自己拉），
+      // 不接这条线，重连就只剩「状态变绿、工具仍不可用」（issue #148）。
+      const mgr = new McpManager(liveMcp, {
+        onToolsChanged: (tools) => sharedRuntime.sessions?.injectMcpTools(tools),
+      })
       await mgr.initialize()
       // Assign mgr FIRST so POST /mcp/servers can route to connectAndDiscover
       // immediately. Otherwise a POST between reconcile arg-eval and assignment
@@ -1063,6 +1069,9 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     }
     return snap
   }
+  // 账号路由（桌面端 device flow）；主体、代理注入与测试在 account-routes.ts。
+  Object.assign(routes, buildAccountRoutesFor(apiToken, ctx.config))
+
   Object.assign(
     routes,
     buildHealthRoute(sessions, startedAt, version, apiToken, registryReady, serveConfigured, loopLagForHealth),

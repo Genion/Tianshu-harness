@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Config } from './schema.js'
 
-export type ProFeature = 'computerUse' | 'chatGateway' | 'teamMax' | 'councilMultiRound' | 'unattendedAutomation' | 'spark'
+export type ProFeature = 'computerUse' | 'chatGateway' | 'teamMax' | 'councilMultiRound' | 'unattendedAutomation' | 'spark' | 'observerShadow'
 
 export interface ProLicenseInfo {
   enabled: boolean

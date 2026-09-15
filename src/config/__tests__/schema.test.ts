@@ -474,3 +474,35 @@ describe('providerSchema keyRef and userSaved fields', () => {
     assert.throws(() => providerSchema.parse(input))
   })
 })
+
+describe('workspace schema (issue #147)', () => {
+  it('defaults to an empty object — 未配置时零行为变化', () => {
+    const parsed = configSchema.parse(DEFAULT_CONFIG)
+    assert.deepEqual(parsed.workspace, {})
+    assert.equal(parsed.workspace.defaultDir, undefined)
+    assert.equal(parsed.workspace.scratchDir, undefined)
+  })
+
+  it('round-trips defaultDir and scratchDir', () => {
+    const parsed = configSchema.parse({
+      ...DEFAULT_CONFIG,
+      workspace: { defaultDir: '/work/default', scratchDir: '/work/scratch' },
+    })
+    assert.equal(parsed.workspace.defaultDir, '/work/default')
+    assert.equal(parsed.workspace.scratchDir, '/work/scratch')
+  })
+
+  it('workspace 段存在时既有段落不受影响', () => {
+    const parsed = configSchema.parse({
+      ...DEFAULT_CONFIG,
+      workspace: { defaultDir: '/work/default' },
+    })
+    assert.deepEqual(parsed.ui, {})
+    assert.deepEqual(parsed.verify, {})
+    assert.equal(parsed.mcp.servers && Object.keys(parsed.mcp.servers).length, 0)
+  })
+
+  it('rejects non-string workspace paths', () => {
+    assert.throws(() => configSchema.parse({ ...DEFAULT_CONFIG, workspace: { defaultDir: 123 as any } }))
+  })
+})

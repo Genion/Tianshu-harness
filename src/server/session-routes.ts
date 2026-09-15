@@ -45,6 +45,7 @@ import type { PlanDocument } from '../plan/plan-store.js'
 import type { Config } from '../config/schema.js'
 import type { SessionEvent, SessionRecord } from './protocol.js'
 import { compactReplayRuns, compactReplayRunsWithStats, isReplayCompactionEnabled } from './replay-compaction.js'
+import { isSessionWorkspaceMode, type SessionWorkspaceMode } from './workspace.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
 import { getRollbackPreview, rollbackToCheckpoint, makeOwnershipGuard } from '../agent/checkpoint.js'
 import { listProjectFiles, rankFiles, listDirEntries } from './file-list.js'
@@ -345,7 +346,9 @@ export function buildSessionRoutes(
       // from SSE/stream issues. See docs/dev/render-debug-playbook.md.
       const __dbg = process.env.RIVET_DEBUG_RENDER === '1'
       const __t0 = __dbg ? Date.now() : 0
-      const data = (body ?? {}) as { cwd?: string; title?: string; prompt?: string; missionId?: string; approvalMode?: unknown; isolatedWorktree?: unknown; model?: string; domain?: string; reasoningEffort?: unknown; planMode?: unknown; askMode?: unknown; planAutoApproveUi?: unknown; images?: unknown; documents?: unknown }
+      const data = (body ?? {}) as { cwd?: string; workspaceMode?: unknown; title?: string; prompt?: string; missionId?: string; approvalMode?: unknown; isolatedWorktree?: unknown; model?: string; domain?: string; reasoningEffort?: unknown; planMode?: unknown; askMode?: unknown; planAutoApproveUi?: unknown; images?: unknown; documents?: unknown }
+      // issue #147 — 非法 workspaceMode 显式 400（静默降级会让客户端以为用了默认工作区）。
+      if (data.workspaceMode !== undefined && !isSessionWorkspaceMode(data.workspaceMode)) return { status: 400, body: { error: 'Invalid "workspaceMode" (explicit|default|scratch)' } }
       if (data.approvalMode !== undefined && !isApprovalMode(data.approvalMode)) {
         return { status: 400, body: { error: 'Invalid "approvalMode"' } }
       }
@@ -380,6 +383,7 @@ export function buildSessionRoutes(
       }
       const rec = manager.createSession({
         cwd: data.cwd,
+        workspaceMode: data.workspaceMode as SessionWorkspaceMode | undefined,
         title: data.title,
         prompt,
         images: imagesCheck.images,
@@ -471,6 +475,21 @@ export function buildSessionRoutes(
         return { status: 404, body: { error: 'Session not found' } }
       }
       return { status: 200, body: { id, planMode: data.state } }
+    }, apiToken),
+
+    // Zen Mode（禅模式）跳过读专注相位——等价 TUI `/fast`，桌面端没有 /fast 故走
+    // 这条（会话操作区与 /zen skip 命令共用）。晋升后 onZenPhaseChange 发 zen_phase
+    // 事件 + 落 record 镜像，前端不必自己改相位状态；未 arm/已晋升时 promoted:false
+    // 是如实报告（不是错误），前端据此提示「当前不是读专注相位」。
+    'POST /sessions/:id/zen': withAuth(async (body, params) => {
+      const id = params!.id!
+      const data = (body ?? {}) as { action?: unknown }
+      if (data.action !== 'skip') {
+        return { status: 400, body: { error: 'Invalid or missing "action" (skip)' } }
+      }
+      const res = await manager.skipZen(id)
+      if (!res) return { status: 404, body: { error: 'Session not found' } }
+      return { status: 200, body: { id, ...res } }
     }, apiToken),
 
     // Ask mode — toggle the session into pure read-only Q&A ('asking') or back

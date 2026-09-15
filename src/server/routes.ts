@@ -26,7 +26,9 @@ function unauthorized() {
   return { status: 401, body: { error: 'Unauthorized' } }
 }
 
-function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
+/** 共享 Bearer 认证包装。账号路由（account-routes.ts）复用同一份——
+ *  认证规则改动漏掉任何一份都是安全洞。 */
+export function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
   return async (body, params, headers, res) => {
     if (!isAuthorizedRequest({ body, headers }, apiToken)) return unauthorized()
     return handler(body, params, headers, res)

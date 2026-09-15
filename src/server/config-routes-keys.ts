@@ -189,7 +189,12 @@ export function buildProviderKeyRoutes(apiToken?: string): Record<string, RouteH
         return { status: 400, body: { error: 'provider name, keyId and modelId are required' } }
       }
       const { model } = (body ?? {}) as { model?: unknown }
-      const parsed = parseModels(model === undefined ? [] : [model])
+      // 缺 model 键：parseModels([]) 返回空数组，下方 models[0]! 断言会抛
+      // TypeError 变成未捕获 rejection（请求挂死）——显式 400 才是契约。
+      if (model === undefined || model === null) {
+        return { status: 400, body: { error: 'model is required' } }
+      }
+      const parsed = parseModels([model])
       if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
       const entry = parsed.models[0]!
       if (entry.id !== modelId) {

@@ -22,6 +22,8 @@ import {
   isTerminalPollStatus,
   accountStore,
   saveAccountToken,
+  deviceAuthorizeUrl,
+  requestDeviceCode,
 } from '../account.js'
 
 // ── 解析契约 ─────────────────────────────────────────────────────────────
@@ -117,4 +119,41 @@ test('saveAccountToken 拒绝没有 token 的轮询结果', () => {
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ── 授权链接 ─────────────────────────────────────────────────────────────
+
+test('设备授权链接补上 userCode——裸基址会让授权页停在「缺少授权码」', () => {
+  // 页面契约（官网 DeviceAuthorizeView.vue）：从 route.query.code 读设备码，
+  // 读不到就进 no-code 态，文案是「请从终端或桌面端的提示里复制完整链接，
+  // 或在地址后补上 ?code= 参数」——即客户端该给出完整链接。
+  // 而 EF 的 verifyUrl 是可配置的页面基址、不带 code（2026-09-14 实测线上响应：
+  // {"verifyUrl":"https://tianshuharness.com/auth/device"}）。
+  assert.equal(
+    deviceAuthorizeUrl('https://tianshuharness.com/auth/device', '483920'),
+    'https://tianshuharness.com/auth/device?code=483920',
+  )
+  // 基址已带 query 时用 & 续接——拼出两个 ? 会让页面读不到 code
+  assert.equal(
+    deviceAuthorizeUrl('https://x.dev/auth/device?lang=zh', '483920'),
+    'https://x.dev/auth/device?lang=zh&code=483920',
+  )
+})
+
+test('requestDeviceCode 返回的 verifyUrl 可直接打开（已含 code）', async () => {
+  const created = await requestDeviceCode({
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          deviceCode: 'dc-1',
+          userCode: '483920',
+          expiresIn: 300,
+          pollInterval: 5,
+          verifyUrl: 'https://tianshuharness.com/auth/device',
+        }),
+        { status: 200 },
+      ),
+  })
+  assert.equal(created.verifyUrl, 'https://tianshuharness.com/auth/device?code=483920')
+  assert.equal(created.userCode, '483920')
 })
