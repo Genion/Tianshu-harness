@@ -53,6 +53,31 @@ export function setClipboardReader(reader: ClipboardReader | null): void {
   _reader = reader
 }
 
+/**
+ * 粘贴文本是否像「二进制被当文本送进来」的乱码——即右键粘贴图片时，终端把
+ * 图片字节塞进 bracketed paste 的形态。
+ *
+ * 判定依据是字节经 UTF-8 解码后留下的固定痕迹：解码失败点变成 U+FFFD
+ * （本仓库 paste-integration 的乱码样本即以此构造），按单字节解释的字节则
+ * 落在 C1 控制符 (U+0080–U+009F)、私用区或缺代理对。
+ *
+ * 用途（性能前提，不是洁癖）：onPaste 只在命中时才去读系统剪贴板图片。无
+ * native 读图包时 macOS 退化为 spawn osascript，本机实测中位 422ms——无条件
+ * 调用等于给每次普通文本粘贴加半秒延迟（端到端实测 512ms vs 5ms）。
+ * 代价不对称，故判定取宽：误判只是白读一次剪贴板（随后照常插入文本），
+ * 漏判才会退化成「乱码进输入框」。
+ */
+export function looksLikeBinaryPaste(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!
+    if (cp === 0xfffd) return true // UTF-8 解码失败标记
+    if (cp >= 0x80 && cp <= 0x9f) return true // C1 控制符（单字节解释的残渣）
+    if (cp >= 0xd800 && cp <= 0xdfff) return true // 孤立代理
+    if (cp >= 0xe000 && cp <= 0xf8ff) return true // 私用区
+  }
+  return false
+}
+
 // ── Main entry ──
 
 export async function readImageFromClipboard(): Promise<ClipboardImage | null> {

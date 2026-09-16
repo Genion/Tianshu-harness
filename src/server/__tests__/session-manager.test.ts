@@ -66,6 +66,14 @@ class FakeAgent implements ManagedAgent {
     this.callbacks?.onAbort(reason)
     this.resolveRun?.()
   }
+  /** 模拟流错误（超时/网络）终结本 run：onError + onStreamInterrupted + run settle。
+   *  区别于 abort()（用户中止→aborted）与 finish()（成功→completed）。 */
+  streamInterrupt(message = 'Request timed out: server did not respond within 45 seconds'): void {
+    const err = new Error(message)
+    this.callbacks?.onError(err)
+    this.callbacks?.onStreamInterrupted?.(err)
+    this.resolveRun?.()
+  }
   setApprovalMode(mode: string): void { this.liveApprovalMode = mode }
   listArtifacts(): Artifact[] { return this.artifacts }
   readArtifact(id: string): Promise<string | null> {
@@ -459,6 +467,18 @@ test('completed run emits a terminal done event', async () => {
   const events = manager.getEvents(s.id, 0)!.events
   assert.ok(events.some((e) => e.type === 'done'))
   assert.equal(manager.getSession(s.id)!.status, 'completed')
+})
+
+test('stream interrupt（超时）终结会话为 interrupted——不再误报 completed（2026-09-16 终态语义修复）', async () => {
+  const { manager, agents } = makeManager()
+  const s = manager.createSession({ prompt: 'go' })
+  agents[0]!.streamInterrupt()
+  await new Promise((r) => setTimeout(r, 0))
+  const events = manager.getEvents(s.id, 0)!.events
+  const done = events.find((e) => e.type === 'done')
+  assert.ok(done, '应有终态 done 事件')
+  assert.equal(done!.data.status, 'interrupted')
+  assert.equal(manager.getSession(s.id)!.status, 'interrupted')
 })
 
 // ── R1: registry lifecycle (register / heartbeat / release) ──────────

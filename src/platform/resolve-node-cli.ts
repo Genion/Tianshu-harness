@@ -100,6 +100,26 @@ function systemPathFallback(platform: NodeJS.Platform, base: Record<string, stri
 }
 
 /**
+ * 会被 Windows 文件关联「打开」而非执行的脚本宿主扩展。cmd 按 PATHEXT 匹配到
+ * 这些扩展即走 ShellExecute（.js → 记事本、.vbs → WSH…），是 issue #149
+ * 根因 B 的介质：`cmd /d /s /c <bin名>` 在 CWD 优先搜索时被同名 .js 拦下，
+ * PATH 里的 .cmd shim 永远到不了。
+ */
+const SCRIPT_HOST_EXTS = new Set(['.JS', '.JSE', '.VBS', '.VBE', '.WSF', '.WSH', '.MSC'])
+
+/** 剔除脚本宿主扩展后的安全 PATHEXT——保留 COM/EXE/BAT/CMD 这些真正可执行的
+ *  形态（npx 的 .cmd shim 正是靠 .CMD 命中）。 */
+const SAFE_PATHEXT = '.COM;.EXE;.BAT;.CMD'
+
+/** 剔除 PATHEXT 里的脚本宿主扩展；空/缺失/全被剔时给安全默认值。 */
+function sanitizePathext(value: string | undefined): string {
+  const base = value?.trim() ? value : SAFE_PATHEXT
+  const kept = base.split(';').map(s => s.trim()).filter(Boolean)
+    .filter(ext => !SCRIPT_HOST_EXTS.has(ext.toUpperCase()))
+  return kept.length > 0 ? kept.join(';') : SAFE_PATHEXT
+}
+
+/**
  * Build an env object for MCP stdio transports: always explicit, with the
  * hosting Node directory prepended to PATH so npx-cli can find the same node.
  * User-supplied env is merged, but nodeDir is written last onto PATH.
@@ -128,9 +148,21 @@ export function buildStdioEnvWithNodePath(
   const nodeDir = p.dirname(execPath)
   const pathRest = user.PATH ?? user.Path ?? base.PATH ?? base.Path ?? ''
   const fallback = pathRest ? [] : systemPathFallback(platform, base)
-  return {
-    ...base,
-    ...user,
+  const merged = { ...base, ...user }
+  const env: Record<string, string> = {
+    ...merged,
     PATH: [nodeDir, ...(pathRest ? [pathRest] : fallback)].join(pathSep),
   }
+  if (platform === 'win32') {
+    // issue #149 根因 B：npx 分发的 bin 由 `cmd /d /s /c <bin名>` 执行，cmd 按
+    // PATHEXT 在 CWD 优先匹配——CWD 里的同名 .js 会被文件关联「打开」（记事本），
+    // PATH 里的 .cmd shim 永远到不了，子进程秒退 -32000。剔除脚本宿主扩展后
+    // cmd 只认真正可执行的扩展。
+    // 注意："基座未给 PATHEXT"是常态而非边角：SDK 1.29.0 的 win32 白名单不含
+    // PATHEXT（子进程 env 无此变量 → cmd 回落系统默认——含 .JS，正是缺陷介质），
+    // 显式补安全默认即主修复路径；带值的场景来自 server 自定义 env / 应用设置。
+    delete env.Pathext
+    env.PATHEXT = sanitizePathext(merged.PATHEXT ?? merged.Pathext)
+  }
+  return env
 }

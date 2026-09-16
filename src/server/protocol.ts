@@ -25,7 +25,7 @@
  */
 export const PROTOCOL_VERSION = 1
 
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted'
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted' | 'interrupted'
 
 /**
  * S — autonomy level. Canonical wire definition; the agent runtime re-exports

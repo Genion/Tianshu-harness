@@ -63,13 +63,15 @@ test('找到模型但缺少 API key → 返回 API key 错误（非 oauth）', (
   assert.match(res.error ?? '', /API key/i)
 })
 
-test('按 alias 也能匹配到模型（未找到分支不误报）', () => {
-  // alias 命中但缺 key → 至少不应报 "not found"（证明 alias 查找生效）
+test('模型存在但缺 key：报 API key 而非 not found（未找到分支不误报）', () => {
+  // 判据是「找到了模型、只是 key 缺失」。config 的 model.alias 字段 2026-09 起
+  // 废弃（不落盘、不作为模型引用），故这里按 id 引用——按 alias 引用不再解析
+  // 是预期的 fail-closed 行为，不再断言。
   const ctx = makeCtx({
-    p1: { name: 'p1', apiKey: 'k', models: [{ id: 'cur', alias: 'cur' }] },
-    p2: { name: 'p2', apiKeyEnv: '__RIVET_TEST_MISSING_KEY2__', models: [{ id: 'real-id', alias: 'nice-alias' }] },
+    p1: { name: 'p1', apiKey: 'k', models: [{ id: 'cur' }] },
+    p2: { name: 'p2', apiKeyEnv: '__RIVET_TEST_MISSING_KEY2__', models: [{ id: 'real-id' }] },
   })
-  const res = switchAgentRuntime(ctx, 'nice-alias')
+  const res = switchAgentRuntime(ctx, 'real-id')
   assert.equal(res.ok, false)
   assert.doesNotMatch(res.error ?? '', /not found/i)
   assert.match(res.error ?? '', /API key/i)

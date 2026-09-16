@@ -89,3 +89,52 @@ test('右键粘贴：剪贴板无图时正常插入文本', async () => {
   assert.equal(app.getInputImagesCount(), 0, '不应附加图片')
   app.dispose()
 })
+
+test('性能契约：普通文本粘贴不读剪贴板图片', async () => {
+  // onPaste 只在粘贴文本像二进制乱码时才去读剪贴板。旧实现无条件读——
+  // macOS 无 native 读图包时退化为 spawn osascript，本机实测每次普通文本粘贴
+  // 被推迟 410–707ms（端到端中位 512ms，跳过读图后 5ms）。
+  let readCalls = 0
+  setClipboardReader({
+    readImage: async () => { readCalls++; return null },
+  })
+  const { app, stdin } = makeApp()
+  app.start()
+  stdin.dataHandler!('\x1B[200~const a = 1\x1B[201~')
+  await tick(30)
+  assert.equal(app.getInputValue(), 'const a = 1', '文本正常插入')
+  assert.equal(readCalls, 0, '普通文本粘贴不应触发剪贴板读图（每次约 0.5s）')
+  app.dispose()
+})
+
+test('性能契约：多行/中文粘贴同样走零等待快路径', async () => {
+  let readCalls = 0
+  setClipboardReader({
+    readImage: async () => { readCalls++; return null },
+  })
+  const { app, stdin } = makeApp()
+  app.start()
+  stdin.dataHandler!('\x1B[200~第一行 🎉\r\nsecond line\x1B[201~')
+  await tick(30)
+  assert.equal(app.getInputValue(), '第一行 🎉\nsecond line', 'CRLF 规范化 + 原样插入')
+  assert.equal(readCalls, 0, '中文/emoji/多行仍属正常文本')
+  app.dispose()
+})
+
+test('防乱码防御未退化：乱码粘贴仍读剪贴板并附图', async () => {
+  let readCalls = 0
+  setClipboardReader({
+    readImage: async () => {
+      readCalls++
+      return { dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }
+    },
+  })
+  const { app, stdin } = makeApp()
+  app.start()
+  stdin.dataHandler!('\x1B[200~\ufffd\ufffd\ufffd\x00\x01\x02\x1b[201~')
+  await tick(30)
+  assert.equal(readCalls, 1, '乱码粘贴应尝试读剪贴板图片')
+  assert.equal(app.getInputImagesCount(), 1, '应附加 1 张图片')
+  assert.equal(app.getInputValue(), '', '乱码文本不应进入输入框')
+  app.dispose()
+})

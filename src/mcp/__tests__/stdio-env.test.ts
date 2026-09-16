@@ -81,3 +81,26 @@ describe('buildStdioChildEnv', () => {
     assert.equal('NO_PROXY' in env, false)
   })
 })
+
+// ── issue #149 根因 B：生产入口（transport-factory → 本函数）的 PATHEXT 净化 ──
+// 只在下层（resolve-node-cli）测不够：本函数是 transport-factory 的实际入口，
+// 中间层若重新注入 PATHEXT 会绕过净化——此用例锁住端到端契约。
+describe('buildStdioChildEnv — PATHEXT 净化经生产入口生效（issue #149 根因 B）', () => {
+  it('win32: 基座白名单带的 PATHEXT 被净化后传给子进程', () => {
+    const env = buildStdioChildEnv(undefined, {}, undefined, {
+      execPath: 'C:\\app\\node.exe',
+      platform: 'win32',
+      getDefaultEnvironment: () => ({ PATHEXT: '.COM;.EXE;.BAT;.CMD;.JS;.VBS', SYSTEMROOT: 'C:\\Windows' }),
+    })
+    assert.equal(env.PATHEXT, '.COM;.EXE;.BAT;.CMD')
+  })
+
+  it('win32: server 静态 env 里带的 PATHEXT 同样被净化（用户配置不是豁免）', () => {
+    const env = buildStdioChildEnv({ PATHEXT: '.JS;.EXE' }, {}, undefined, {
+      execPath: 'C:\\app\\node.exe',
+      platform: 'win32',
+      getDefaultEnvironment: () => ({}),
+    })
+    assert.equal(env.PATHEXT, '.EXE')
+  })
+})
