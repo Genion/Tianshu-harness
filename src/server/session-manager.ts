@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { debugLog } from '../utils/debug.js'
 import { collectPostBoundaryEditIds } from '../agent/file-history.js'
 import { loadConfig } from '../config/manager.js'
+import { rivetHome } from '../config/paths.js'
 import type { DelegationActivity, Tool } from '../tools/types.js'
 import type { ApprovalResult } from '../agent/approval-edit.js'
 import type { HookEvent, HookResult } from '../hooks/user-hooks-runner.js'
@@ -35,6 +36,8 @@ import { isAssistantWithTools, oaiMessageText, type OaiToolCall } from '../api/o
 import { buildUserAnchors, stripInjectedSuffix } from './rewind-anchors.js'
 import { toolArgSummary } from '../tui/tool-label.js'
 import { listPersistedResultRounds, loadPersistedResult, type PersistedResultRound } from '../agent/coordinator.js'
+import { reapSessionModuleStores } from '../agent/session-module-store-reaper.js'
+import { deleteSessionFiles } from '../agent/session-persist.js'
 import { loadWorkerSession } from '../agent/worker-session-persist.js'
 import type { SessionRegistry } from '../agent/session-registry.js'
 import type { DecisionShift } from '../agent/loop-types.js'
@@ -69,6 +72,7 @@ import type { MissionStore } from './mission-store.js'
 import { join, resolve, dirname } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { existsSync, copyFileSync, statSync, mkdirSync } from 'node:fs'
+import { resolveSessionWorkspaceForSession, type SessionWorkspaceMode } from './workspace.js'
 import { createWorktree, removeWorktree, listWorktrees, hasUnlandedWork, commitAll, revParseHead, squashMergeBranch, pushBranch, type WorktreeEntry } from '../agent/worktree.js'
 import { createPr } from './gh-cli.js'
 import { getGitGraph, getWorkingTreeFiles, getFileDiff, getFileAtBase, listGitBranches } from '../tools/git.js'
@@ -280,6 +284,20 @@ export interface ManagedAgent {
   /** 识图桥真实状态（active/source/detail）。UI 据此显示准确提示，而非只看
    *  config 有没有 visionModel 键。Optional 以便轻量测试替身无需实现。 */
   getVisionBridge?(): { active: boolean; source: 'native' | 'configured' | 'auto' | 'same-provider' | 'none'; detail?: string } | undefined
+  /**
+   * Zen Mode（禅模式）——跳过读专注相位：用户显式动手意图，立即晋升 full 并放行。
+   * Mirrors AgentLoop.promoteZen. Optional so lightweight test doubles need not
+   * implement it（缺省按「未晋升」处理，这不是错误）。
+   */
+  promoteZen?(reason: 'tool' | 'timeout' | 'triage' | 'user'): boolean
+  /**
+   * 禅相位读取面（只取相位与已消耗轮数）。Optional：缺省按 full / 0 处理——与
+   * zen_phase 是边沿事件、「无记录 ≠ 禅相位」的保守口径一致。
+   */
+  zenController?: {
+    readonly currentPhase: 'zen' | 'full'
+    snapshot(): { zenStats: { zenTurns: number } }
+  }
   /**
    * Plan mode change notification — assigned by the session layer so agent-side
    * transitions (e.g. the model calling plan action=enter_mode) surface as
@@ -504,6 +522,8 @@ export interface GoalSnapshot {
 
 export interface CreateSessionInput {
   cwd?: string
+  /** 工作区意图（issue #147）：缺省 'explicit' = 改造前行为；'default' = config.workspace.defaultDir；'scratch' = <rivetHome>/workspace/<短id>。 */
+  workspaceMode?: SessionWorkspaceMode
   title?: string
   prompt?: string
   /** 新建即携带的图片附件（dataUrl 数组）——首轮 run 经 run(id, prompt, images)
@@ -1274,8 +1294,12 @@ export class RuntimeSessionManager {
     this.storesForgetter = fn
   }
 
-  private forgetStores(sessionId: string): void {
+  private forgetStores(sessionId: string, terminal = false): void {
     try { this.storesForgetter?.(sessionId) } catch { /* best-effort */ }
+    // agent 层五张会话键控 module store 的收割汇点外移在新模块——releaseAgent 与
+    // hardDelete 双链都经此处；terminal 区分挂起级（清大对象、保留门禁类记录）与
+    // 终结级（全清），理由见 reaper 模块头（2026-09-16 审查修复）。
+    reapSessionModuleStores(sessionId, terminal)
   }
 
   /** Shut down and drop a session's built agent (timers, coordinator, in-flight
@@ -1950,8 +1974,12 @@ export class RuntimeSessionManager {
     const i = this.loadedOrder.indexOf(id)
     if (i !== -1) this.loadedOrder.splice(i, 1)
     try { this.persistence?.deleteSession?.(id) } catch { /* best-effort */ }
+    // 会话盘上文件（transcript/meta/memory/claims/frozen + 同名子目录）与列表
+    // 缓存条目一并清除——此前只清 events 子目录，残留会让文件系统盘点时列出
+    // 已删会话（2026-09-16 审查修复，探针实测）。
+    try { deleteSessionFiles(s.record.cwd, id) } catch { /* best-effort */ }
     // Permanently destroyed — never rebuilds, so drop stores unconditionally.
-    this.forgetStores(id)
+    this.forgetStores(id, true)
     this.notifySessionsChanged('delete')
     return true
   }
@@ -2132,7 +2160,11 @@ export class RuntimeSessionManager {
 
   createSession(input: CreateSessionInput = {}): SessionRecord {
     const id = this.idGenerator()
-    let cwd = input.cwd ?? this.defaultCwd
+    // issue #147 — 判定/落盘主体在 ./workspace.ts，此处只传依赖（守行数棘轮）。
+    let workspace = resolveSessionWorkspaceForSession({
+      requested: input.cwd, mode: input.workspaceMode, processCwd: this.defaultCwd,
+      sessionId: id, rivetHome: rivetHome(), readConfig: loadConfig })
+    let cwd = workspace.path
     let worktreeBranch: string | undefined
     let worktreePath: string | undefined
     let baselineHead: string | undefined
@@ -2143,6 +2175,8 @@ export class RuntimeSessionManager {
         worktreeBranch = wt.branch
         worktreePath = wt.path
         cwd = wt.path
+        // worktree 由显式 cwd 派生——来源保持 'explicit'（不因目录改写而变）。
+        workspace = { path: wt.path, source: 'explicit', managed: false }
         // Diff baseline for the Changes tab: task delta stays visible even
         // after the agent commits mid-task.
         baselineHead = revParseHead(wt.path)
@@ -2183,6 +2217,7 @@ export class RuntimeSessionManager {
         createdAt: ts,
         updatedAt: ts,
         cwd,
+        workspaceSource: workspace.source,
         title: input.title,
         lastSeq: 0,
         pendingApprovals: 0,
@@ -3481,6 +3516,23 @@ export class RuntimeSessionManager {
     this.append(session, 'plan_mode', { state })
     this.persistRecord(session)
     return true
+  }
+
+  /**
+   * 跳过当前会话的禅相位（等价 TUI `/fast`）：用户显式动手意图 → 立即晋升 full。
+   * 晋升经 onZenPhaseChange 走 `zen_phase` 事件 + record 镜像，前端不必自己改本地
+   * 状态。未 arm / 已晋升时 promoted:false——如实报告，不是错误。会话不存在 → null。
+   */
+  async skipZen(id: string): Promise<{ promoted: boolean; phase: 'zen' | 'full'; zenTurns: number } | null> {
+    const session = this.sessions.get(id)
+    if (!session) return null
+    const agent = await this.ensureAgentAsync(session)
+    // 可选调用：轻量测试替身不带 zen 面 → promoted:false、相位按 full 如实报告，
+    // 而不是抛错（与 ManagedAgent 里其它 optional 能力的处理口径一致）。
+    const promoted = agent.promoteZen?.('user') ?? false
+    const phase = agent.zenController?.currentPhase ?? 'full'
+    const zenTurns = agent.zenController?.snapshot().zenStats.zenTurns ?? 0
+    return { promoted, phase, zenTurns }
   }
 
   /**
@@ -5261,6 +5313,14 @@ export class RuntimeSessionManager {
       onError: (err) => {
         if (!isActive()) return
         this.append(session, 'error', { error: redactText(err.message) })
+      },
+      onStreamInterrupted: () => {
+        if (!isActive()) return
+        // 流错误（超时/网络）终结本 run：终态如实记 'interrupted'——此前 run 照常
+        // resolve，终态被记为 'completed'，自动化/看板把超时误判为成功
+        //（2026-09-16 终态语义修复）。与 onAbort 同范式（仅 running 才改）；
+        // settle 的 .then 只覆盖 'running'，不会把它刷回 'completed'。
+        if (session.record.status === 'running') session.record.status = 'interrupted'
       },
       onAbort: (reason) => {
         if (!isActive()) return

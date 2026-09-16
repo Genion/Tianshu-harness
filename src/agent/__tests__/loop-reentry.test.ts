@@ -15,6 +15,15 @@ test('run claims the instance synchronously before awaiting idle compaction', as
     abortController: null,
     // 64c692e4：run() 在 drain 前调用 session.resetSrCount()（SR 每轮上限）
     session: { resetSrCount: () => {} },
+    // zen 相位接入后 run() 在首个 await 前发一次相位镜像（emitZenPhaseEvent：
+    // 参数求值读 this.zenController，方法体读 this.config.zen）、drain 后再打
+    // 一次 turn 边界。裸 fake 缺这些 → 第一次 run 在进入 cancelIdleCompaction
+    // 之前就抛 TypeError（先是 is not a function，补桩后是 currentPhase），于是
+    // cancelCalls 恒为 0——这条红看着像产品契约回归，实为 fake 过时（2026-09-15
+    // 收口）。两个方法桩 + 参数求值所需的 zenController 即可，与本轮不变量无关。
+    emitZenPhaseEvent: () => {},
+    zenTurnBoundary: () => {},
+    zenController: { currentPhase: 'full', lastPromoteReason: undefined },
     cancelIdleCompaction: async () => {
       cancelCalls++
       await idleGate

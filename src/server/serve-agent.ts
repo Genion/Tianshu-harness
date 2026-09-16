@@ -913,6 +913,10 @@ export function buildManagedAgent(
     // Wave L: 进程退出释放本 session 的 coordinator timer + in-flight worker
     // 句柄。abort() 仅中止当前 turn；shutdown() 是终结性操作。
     shutdown: async () => {
+      // config 热载 watcher 是 AgentLoop 级句柄：sidecar 空闲回收/归档 agent 时必须
+      // 显式 close，否则每次漏 2-3 个 FSWatcher 并经闭包钉住整个旧 AgentLoop 对象图。
+      // （TUI switch 三路径已在 bootstrap 显式调 stop——此处补齐 serve 释放链。）
+      try { agent.stopConfigWatcher() } catch { /* best-effort */ }
       try { void agent.cancelIdleCompaction() } catch { /* best-effort */ }
       // 中止路径的 postSession 在后台链上（memory/consolidation 写入）；进程关停前有界收口。
       try { await agent.drainPostSession(5_000) } catch { /* best-effort */ }

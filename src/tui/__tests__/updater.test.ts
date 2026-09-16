@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -14,6 +14,8 @@ import {
   fetchNpmLatestVersion,
   fetchGitHubLatestVersion,
   npmPackageExists,
+  detectInstallRoot,
+  getCurrentVersion,
 } from '../updater.js'
 import { WinStreamDecoder } from '../../platform.js'
 import { ProxyAgent } from 'undici'
@@ -440,5 +442,58 @@ describe('npmPackageExists', () => {
     }
     await npmPackageExists('tianshu-tui')
     assert.equal(method, 'GET')
+  })
+})
+
+// ─── 包根解析：dist/ 的 ESM 声明不得劫持安装根 ───
+// dist/package.json 只含 {"type":"module"}（stage-runtime-deps.js 为「dist 脱离仓库
+// 独立分发」而写）。若实现是「向上找到第一个 package.json 就返回」，就会停在
+// <root>/dist：getCurrentVersion → null、readPackageName → null、detectInstallType
+// 误判为 local。表现为欢迎页版本号消失、自动更新检查拿不到包名。
+describe('detectInstallRoot 不被 dist 的 ESM 声明劫持', () => {
+  /** 造一棵最小安装树：根有真包声明，dist/ 只有 ESM 声明。 */
+  function makeInstallTree(): string {
+    const root = mkdtempSync(join(tmpdir(), 'rivet-install-root-'))
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'tianshu-tui', version: '9.9.9' }))
+    mkdirSync(join(root, 'dist', 'cli'), { recursive: true })
+    writeFileSync(join(root, 'dist', 'package.json'), JSON.stringify({ type: 'module' }))
+    // 入口文件必须真实存在——detectInstallRoot 对 argv[1] 做 realpathSync，
+    // 路径不存在会直接 catch → null（那会让测试红在探针上而不是被测行为上）。
+    writeFileSync(join(root, 'dist', 'main.js'), '')
+    writeFileSync(join(root, 'dist', 'cli', 'entry.js'), '')
+    return root
+  }
+
+  it('入口位于 dist/ 时返回真正的包根而非 dist', () => {
+    const root = makeInstallTree()
+    const origArgv1 = process.argv[1]
+    try {
+      process.argv[1] = join(root, 'dist', 'main.js')
+      // realpath 归一化：macOS 的 /var 是 /private/var 的 symlink，
+      // findInstallRoot 返回的是 realpath 展开后的祖先目录。
+      assert.equal(detectInstallRoot(), realpathSync(root))
+      assert.equal(getCurrentVersion(realpathSync(root)), '9.9.9')
+    } finally {
+      // noUncheckedIndexedAccess：argv[1] 类型是 string | undefined，
+      // 原值缺失时要 delete 而不是赋 undefined。
+      if (origArgv1 === undefined) delete process.argv[1]
+      else process.argv[1] = origArgv1
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('入口位于 dist/cli/ 时同样返回包根', () => {
+    const root = makeInstallTree()
+    const origArgv1 = process.argv[1]
+    try {
+      process.argv[1] = join(root, 'dist', 'cli', 'entry.js')
+      assert.equal(detectInstallRoot(), realpathSync(root))
+    } finally {
+      // noUncheckedIndexedAccess：argv[1] 类型是 string | undefined，
+      // 原值缺失时要 delete 而不是赋 undefined。
+      if (origArgv1 === undefined) delete process.argv[1]
+      else process.argv[1] = origArgv1
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

@@ -15,7 +15,7 @@ import { classifySandboxDenial, buildSandboxDenialHint, recordSandboxLearn } fro
 import type { SandboxDenial } from './sandbox-diagnose.js'
 import { grantPath } from './path-grants.js'
 import { rivetHome } from '../config/paths.js'
-import { isTypecheckCommand, runAdhocTypecheckShared, tryAcquireAdhocLock } from '../lsp/typecheck-cache.js'
+import { isTypecheckCommand, runAdhocTypecheckShared, tryAcquireAdhocLock, TYPECHECK_CALLER_BUDGET_MS } from '../lsp/typecheck-cache.js'
 import { lowDiskWarning } from '../utils/disk-space.js'
 
 /**
@@ -983,6 +983,10 @@ export const BASH_TOOL: Tool = {
       required: ['command'],
     },
   },
+
+  /** typecheck 形态要在跨进程闸门后排队，预算须覆盖其等待上限（TYPECHECK_CALLER_BUDGET_MS）。 */
+  timeoutMs: (params) =>
+    isTypecheckCommand(String(params?.input?.command ?? '')) ? TYPECHECK_CALLER_BUDGET_MS : 120_000,
 
   async execute(params: ToolCallParams) {
     const first = await executeBashMaybeSerialized(params)

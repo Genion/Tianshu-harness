@@ -4,7 +4,8 @@
 # 产物: out/tianshu-runtime-<ver>-<platform>-<arch>.tar.gz (+ .sha256)
 # 布局:
 #   tianshu-runtime-<ver>-<platform>-<arch>/
-#     bin/rivet[.cmd]   启动 shim（exec node dist/main.js）
+#     bin/rivet[.cmd]   启动 shim（exec node dist/cli/entry.js；内置 V8 编译缓存
+#                        与 CLI 早期路由，未命中子命令才加载 main.js）
 #     node/             自带 Node 运行时（复用 desktop/scripts/fetch-node-runtime.js，含 npm）
 #     dist/             内核 bundle（含 dist/node_modules 不可内联依赖 + dist/native）
 #     version.txt
@@ -33,8 +34,8 @@ if [[ "${1:-}" != "--skip-build" ]]; then
   echo "--- npm run build ---"
   npm run build
 fi
-if [[ ! -f "$ROOT/dist/main.js" ]]; then
-  echo "✗ dist/main.js 不存在（先 npm run build）" >&2
+if [[ ! -f "$ROOT/dist/cli/entry.js" ]]; then
+  echo "✗ dist/cli/entry.js 不存在（先 npm run build）" >&2
   exit 1
 fi
 
@@ -66,13 +67,13 @@ echo "$VERSION" > "$STAGE/version.txt"
 if [[ "$PLATFORM" == "win32" ]]; then
   cat > "$STAGE/bin/rivet.cmd" <<'EOF'
 @echo off
-"%~dp0..\node\node.exe" "%~dp0..\dist\main.js" %*
+"%~dp0..\node\node.exe" "%~dp0..\dist\cli\entry.js" %*
 EOF
 else
   cat > "$STAGE/bin/rivet" <<'EOF'
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$DIR/node/node" "$DIR/dist/main.js" "$@"
+exec "$DIR/node/node" "$DIR/dist/cli/entry.js" "$@"
 EOF
   chmod +x "$STAGE/bin/rivet"
 fi

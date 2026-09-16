@@ -34,7 +34,7 @@ These areas are open for contributions. PRs are reviewed on merit:
 | Directory | What It Does | How to Help |
 |-----------|-------------|-------------|
 | `src/tools/` | Tool implementations (definition + execute) | New tools, bug fixes, performance |
-| `src/tui/` | Terminal UI (Ink 6 / React) | Components, accessibility, polish |
+| `src/tui/` | Terminal UI (T9 pure-ANSI engine, zero React/Ink) | Components, accessibility, polish |
 | `src/api/` | API client layer (OpenAI-compatible, streaming) | New providers, error handling |
 | `src/compact/` | Context compression strategies | New strategies, threshold tuning |
 | `src/cache/` | Prefix cache management | Diagnostics, hit-rate improvements |
@@ -55,11 +55,11 @@ These areas affect agent behavior. PRs need extra scrutiny:
 | `src/agent/loop.ts` | Core agent loop — controls turn flow, tool dispatch, error recovery |
 | `src/agent/checkpoint.ts` | Session checkpoint/restore |
 | `src/agent/approval-risk.ts` | Safety risk assessment for tool execution |
-| `src/agent/delegate-*.ts` | Sub-agent coordination |
+| `src/tools/delegate-*.ts` | Sub-agent coordination |
 | `src/agent/compaction-controller.ts` | Context window management |
 | `src/agent/convergence-detector.ts` | Turn termination logic |
 | `src/context/cognitive-ledger.ts` | CVM — cognitive virtual machine state |
-| `src/context/cognitive-mirror.ts` | Behavioral calibration |
+| `src/context/cognitive-ledger.ts` (mirror projection) | Behavioral calibration |
 | `src/agent/behavior-mirror.ts` | Agent self-assessment |
 | `src/agent/cognitive-season.ts` | Cognitive state management |
 
@@ -80,7 +80,7 @@ These files define the agent's identity, memory, and cognitive architecture. **P
 | `src/agent/dream.ts` | Memory protection contract — prevents knowledge corruption |
 | `src/agent/auto-writer*.ts` | Automated knowledge writing |
 | `prompts/` | Tool prompt templates — directly shape agent behavior |
-| `src/agent/claim-extractor.ts` | Extracts claims from agent output into memory |
+| `src/context/claim-extractor.ts` | Extracts claims from agent output into memory |
 | `src/agent/sensorium.ts` | Agent perception layer |
 
 #### Why This Protection Exists

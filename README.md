@@ -199,8 +199,8 @@ rivet
 git clone https://github.com/huiliyi37/Tianshu-Tui.git
 cd Tianshu-Tui
 npm install
-npm run build      # 生成 dist/main.js
-npm start          # 或：node dist/main.js
+npm run build      # 生成 dist/cli/entry.js
+npm start          # 或：node dist/cli/entry.js
 ```
 
 ### 3. 启用 Shell 补全（可选）
@@ -254,7 +254,7 @@ export DEEPSEEK_API_KEY=sk-xxx         # 或：环境变量（仅当前 shell �
 ### 5. 启动
 
 ```bash
-rivet            # 或：npm start / node dist/main.js
+rivet            # 或：npm start / node dist/cli/entry.js
 ```
 
 你会看到带有 `〉` 提示符的 TUI。输入需求后按回车即可。
@@ -940,11 +940,11 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI 渲染
 ### 构建与测试
 
 ```bash
-npx tsc --noEmit                                    # 类型检查
+npm run typecheck                                    # 类型检查
 npm test                                             # 所有测试（16,000+ 用例）
 npm run build                                        # tsup 打包 + 原生/wasm 载荷落位
-node dist/main.js                                    # 启动 TUI
-node dist/main.js -p "fix the typo"                  # 无界面模式
+node dist/cli/entry.js                               # 启动 TUI
+node dist/cli/entry.js -p "fix the typo"             # 无界面模式
 ```
 
 ### 扩展

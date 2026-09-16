@@ -36,6 +36,9 @@ function applyPickerEffort(ctx: BootstrapContext, e: string | undefined): void {
   if ((valid as readonly string[]).includes(e)) ctx.agent.setReasoningEffort(e as (typeof valid)[number])
 }
 import { maybePrintStaticPromptCacheWarning } from './cli/prompt-version-warning.js'
+import { HELP_TEXT } from './cli/help-text.js'
+import { formatVersionLine } from './cli/version.js'
+import { applyEarlyCliEnv, routeEarlyCli } from './cli/early-routing.js'
 import { getOnboardingState, markWelcomeGuideShown, shouldShowWelcomeGuide } from './onboarding.js'
 import { loadConfig as loadRivetConfig, setupProvider, registerProvider, upsertProviderModel, removeProvider, setDefaultProvider, setUiConfig, setApprovalMode as persistApprovalDefault, setDefaultDomainConfig, setDefaultModelConfig } from './config/manager.js'
 import { isProFeatureEnabled } from './config/pro-license.js'
@@ -108,7 +111,7 @@ import { deepseekPricingPhase } from './utils/pricing-phase.js'
 import { projectCacheTelemetry } from './tui/cache-telemetry.js'
 import { CachePanelSource } from './tui/cache-panel-source.js'
 import { sessionsDir } from './config/paths.js'
-import { trustProject, untrustProject, isProjectTrusted, isTrustPromptDismissed, detectProjectTrustStakes, dismissProjectTrustPrompt } from './config/project-trust.js'
+import { trustProject, isProjectTrusted, isTrustPromptDismissed, detectProjectTrustStakes, dismissProjectTrustPrompt } from './config/project-trust.js'
 import { promptProjectTrust } from './cli/project-trust-prompt.js'
 import { fetchOfficialUsage } from './cache/deepseek-official-usage.js'
 import type { CacheStatus } from './tui/status-types.js'
@@ -123,41 +126,14 @@ import { tryResolveCredentialKey } from './api/factory.js'
 const args = process.argv.slice(2)
 
 // --help / --version run before any TTY requirement so they work piped,
-// headless, or in CI. No TUI is started on these paths.
+// headless, or in CI. No TUI is started on these paths. 文本与 launcher
+// （src/cli/entry.ts）共用 cli/help-text.ts / cli/version.ts 两个叶子事实源。
 if (args.includes('--help') || args.includes('-h')) {
-  process.stdout.write(`rivet — 天枢 Tianshu terminal coding agent
-
-Usage:
-  rivet [options]                    interactive TUI (requires TTY)
-  rivet -p "<prompt>" [--json] [--stream-json]   headless one-shot
-  rivet --goal "<task>" [--budget N] [--json] [--stream-json]   headless goal mode
-  rivet sessions                     list sessions and exit
-  rivet logs                         list log locations and exit
-
-Options:
-  --model <name>           use a specific model (e.g. deepseek-v4-pro)
-  --provider <name>        use a specific provider
-  --profile <name>         boot with a named config profile (RIVET_HOME/profiles/<name>.json or built-in lean)
-  -c, --continue           resume the most recent session for this cwd
-  -r, --resume [id|prefix] resume a specific session (bare = open picker)
-  --new                    force a brand-new session
-  --list                   list sessions and exit
-  -p, --print "<prompt>"   headless: answer one prompt, then exit
-  --goal "<task>"          headless goal autonomy (--budget N caps turns)
-  --json | --stream-json   headless output format
-  --stream-events <path>   mirror the run as NDJSON SessionEvents to a file
-  --skip-welcome           skip the welcome page
-  --screen-reader          screen-reader mode
-  --dangerously-skip-permissions   skip permission prompts (high risk)
-  -h, --help               show this help and exit
-  -v, --version            print version and exit
-`)
+  process.stdout.write(HELP_TEXT)
   process.exit(0)
 }
 if (args.includes('--version') || args.includes('-v')) {
-  const root = detectInstallRoot()
-  const version = root ? getCurrentVersion(root) : null
-  process.stdout.write(`tianshu-tui v${version ?? 'unknown'}\n`)
+  process.stdout.write(formatVersionLine())
   process.exit(0)
 }
 
@@ -166,19 +142,9 @@ const requestedModel = modelArgIdx >= 0 ? args[modelArgIdx + 1] : undefined
 const providerArgIdx = args.indexOf('--provider')
 const requestedProvider = providerArgIdx >= 0 ? args[providerArgIdx + 1] : undefined
 
-// P2 Wave 3: --profile <name> → 注入 RIVET_PROFILE（loadConfig 的 profile 层消费）。
-// 显式 flag 优先于既有 env（后者原样保留）。
-const profileArgIdx = args.indexOf('--profile')
-const requestedProfile = profileArgIdx >= 0 ? args[profileArgIdx + 1] : undefined
-if (requestedProfile !== undefined && !requestedProfile.startsWith('-')) {
-  process.env.RIVET_PROFILE = requestedProfile
-}
-
-// --trust / --untrust：workspace-trust 授信/撤销（幂等）。项目级 hooks 与配置
-// 安全敏感键在授信前一律忽略（fail-closed，src/config/project-trust.ts）。
-// 须在任何 loadConfig 之前执行——下方 bootstrap 链会消费项目层配置。
-if (args.includes('--trust')) trustProject(process.cwd())
-if (args.includes('--untrust')) untrustProject(process.cwd())
+// --profile / --trust / --untrust 的早期副作用统一走 cli/early-routing（launcher
+// 与本入口共用一份实现）；须在任何 loadConfig 之前完成，重复调用幂等。
+await applyEarlyCliEnv(args)
 
 // R1: default startup is a fresh session. Session selection flags (Claude Code parity):
 //   --continue / -c              → resume the most recent session for this cwd
@@ -290,68 +256,10 @@ async function main() {
   const stdin = process.stdin
 
   // ── Headless / config routing ──────────────────────────────
-  // 在 TTY 检查之前：先检测无头模式（-p/--print/--json）、配置命令（config），
-  // 若命中则直接路由到对应处理器，不启动 TUI。
-
-  // rivet config ...
-  if (args[0] === 'config') {
-    const { runConfigCLI } = await import('./config/manager.js')
-    await runConfigCLI(args.slice(1))
-    return
-  }
-
-  // rivet provider <add|list|models|probe|remove> — 统一 provider 接入 CLI
-  if (args[0] === 'provider') {
-    const { runProviderCLI } = await import('./config/provider-cli.js')
-    await runProviderCLI(args.slice(1))
-    return
-  }
-
-  // rivet serve [--port N] — HTTP+SSE Runtime API (localhost sidecar for 桌面版)
-  if (args[0] === 'serve') {
-    const { serveCommand } = await import('./server/serve.js')
-    await serveCommand(args.slice(1))
-    return
-  }
-
-  // rivet sessions / rivet --list — print the session list and exit
-  if (args[0] === 'sessions' || args.includes('--list')) {
-    process.stdout.write(SessionPersist.formatSessionList(process.cwd()) + '\n')
-    return
-  }
-
-  // rivet browser [status|install [--no-mirror]] — chromium 就绪检查 / 一键安装。
-  // 放在 TTY 门与 bootstrap 之前：装浏览器不需要 agent/配置/联网到模型，且新用户
-  // 最可能在 TUI 起来前就想先把浏览器备好。
-  if (args[0] === 'browser') {
-    const { runBrowserCLI } = await import('./cli/browser-cli.js')
-    const code = await runBrowserCLI(args.slice(1))
-    if (code !== 0) process.exit(code)
-    return
-  }
-
-  // rivet logs [open [desktop]] [--session <id>] [--json]
-  // 日志落点排查。刻意放在 TTY 门与 bootstrap 之前：TUI 起不来（sidecar 崩、
-  // 配置坏、非 TTY 管道里）恰恰是最需要知道日志在哪的时候，这条路径不初始化
-  // agent、不读配置、不联网。
-  if (args[0] === 'logs') {
-    const { runLogsCLI } = await import('./diagnostics/logs-cli.js')
-    const { output, exitCode } = runLogsCLI(args.slice(1), { cwd: process.cwd() })
-    ;(exitCode === 0 ? process.stdout : process.stderr).write(output + '\n')
-    if (exitCode !== 0) process.exit(exitCode)
-    return
-  }
-
-  // rivet web search <query> / rivet web fetch <url> / rivet web status
-  // web 工具命令行入口与连通性自检——不经过 agent/LLM，确定性可脚本化。
-  // 放在 TTY 门与 bootstrap 之前：纯 CLI（SSH/CI）场景验证代理与 backend 连通性，
-  // 不需要初始化 agent、不联网到模型。
-  if (args[0] === 'web') {
-    const { runWebCLI } = await import('./cli/web-cli.js')
-    const code = await runWebCLI(args.slice(1))
-    if (code !== 0) process.exit(code)
-    return
-  }
+  // 在 TTY 检查之前：命中 config / provider / serve / sessions(--list) /
+  // browser / logs / web 则直接交给处理器并返回，不启动 TUI。路由的唯一
+  // 事实源是 src/cli/early-routing.ts（launcher 未命中时也调用同一函数）。
+  if (await routeEarlyCli(args)) return
 
   // ── Session selection → env signalling for getOrCreateSessionId ──
   // Resolve BEFORE the TTY gate so ambiguous/not-found errors are clear even in
@@ -471,11 +379,11 @@ async function main() {
       ? (pinnedKeyId ? findModelInKey(prov, pinnedKeyId, wantedModelId) : findModelOwner(prov, wantedModelId))
       : undefined
     const model = owner?.model
-      ?? (wantedModelId ? providerPool.find(m => m.id === wantedModelId || m.alias === wantedModelId) : undefined)
+      ?? (wantedModelId ? providerPool.find(m => m.id === wantedModelId) : undefined)
       ?? providerPool[0]!
     // 模型名失配告警（合 origin/main）：静默换档会让「配了多模态模型却看不到图片」
     // 完全无迹可循（兜底档常是同名前缀的纯文本档）。headless 每进程只解析一次，无需去重。
-    if (wantedModelId && !owner && !providerPool.some(m => m.id === wantedModelId || m.alias === wantedModelId)) {
+    if (wantedModelId && !owner && !providerPool.some(m => m.id === wantedModelId)) {
       process.stderr.write(
         `[model] 配置的模型 "${wantedModelId}" 不在 provider "${provName}" 下，`
         + `已回退到 "${model.id}"（该档不支持视觉时图片将无法被识别）。`
@@ -1180,7 +1088,7 @@ async function main() {
       return buildCockpitSnapshot({
         agent: ctx.agent,
         session: ctx.session,
-        model: contractModels(ctx.provider)[0]?.alias ?? contractModels(ctx.provider)[0]?.id ?? 'unknown',
+        model: contractModels(ctx.provider)[0]?.id ?? 'unknown',
         cacheHitRate: ctx.session.getRecentTurnHitRate(3) ?? ctx.session.getCacheHitRate(),
         cost: metrics?.cost ?? 0,
         mcpManager: ctx.refs.mcpManager,
@@ -1256,14 +1164,13 @@ async function main() {
     modelPickerData: () => {
       const activeModelId = ctx?.agent.config.promptEngine.getModel()
       const activeProvider = ctx?.provider.name
-      const entries: { id: string; alias: string; provider: string; current: boolean; contextWindow: number; effortSupported: boolean }[] = []
+      const entries: { id: string; provider: string; current: boolean; contextWindow: number; effortSupported: boolean }[] = []
       // 只显示用户已保存的 provider（userSaved）——内置预设舰队不进切换器。
       for (const [provName, prov] of Object.entries(ctx?.config.provider.providers ?? {})) {
         if (!prov.userSaved) continue
         for (const m of contractModels(prov)) {
           entries.push({
             id: m.id,
-            alias: m.alias ?? m.id,
             provider: provName,
             current: isCurrentModelSelection(provName, m.id, activeProvider, activeModelId),
             contextWindow: m.contextWindow,
@@ -1690,7 +1597,7 @@ async function main() {
             // 当前会话正用被删的模型组——迁移到默认 provider 首个模型。
             // switchAgentRuntime 会先验证模型和凭证；失败时不应提前 abort 当前 agent。
             const prov = fresh.provider.providers[fresh.provider.default]
-            const modelAlias = prov && (contractModels(prov)[0]?.alias ?? contractModels(prov)[0]?.id)
+            const modelAlias = prov && (contractModels(prov)[0]?.id)
             if (!modelAlias) {
               runtime = { needed: true, switched: false, error: '默认 provider 没有可用模型' }
             } else {
@@ -1814,7 +1721,7 @@ async function main() {
       if (ctx) {
         ctx.config.provider = fresh.provider
         const prov = fresh.provider.providers[fresh.provider.default]
-        const modelAlias = prov && (contractModels(prov)[0]?.alias ?? contractModels(prov)[0]?.id)
+        const modelAlias = prov && (contractModels(prov)[0]?.id)
         if (modelAlias) {
           try { ctx.agent.abort() } catch { /* idle */ }
           const res = switchAgentRuntime(ctx, modelAlias)

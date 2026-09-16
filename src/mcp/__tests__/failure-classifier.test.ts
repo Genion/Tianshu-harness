@@ -68,3 +68,65 @@ describe('classifyMcpError', () => {
     assert.equal(result.class, 'tool_error')
   })
 })
+
+/**
+ * issue #149：三种根因（PATH 缺失 / 包不存在 / npm 缓存损坏）都表现为同一个
+ * `-32000: Connection closed`，而分类器此前只看 err.message，看不到 stderr——
+ * 于是给出同一句「进程启动后立即退出」，用户拿不到任何可执行的下一步。
+ *
+ * 这里锁的是「stderr 特征 → 具体根因」的映射。要害在最后两条：识别不出特征时
+ * 必须回落 process，不能把未知当已知——谎报根因比不报更坏。
+ */
+describe('classifyMcpError · stderr 细分（issue #149）', () => {
+  const CLOSED = new Error('MCP error -32000: Connection closed')
+
+  it('stderr 出现 spawn cmd ENOENT → 判为子进程环境（PATH）问题', () => {
+    const result = classifyMcpError(CLOSED, {
+      transport: 'stdio',
+      stderr: 'npm error enoent spawn cmd ENOENT\nnpm error enoent This is related to npm not being able to find a file.',
+    })
+    assert.equal(result.class, 'process_env')
+    assert.equal(result.retryable, false, '环境缺失不会因为重试而自愈')
+    assert.match(result.suggestion, /PATH/i)
+  })
+
+  it('stderr 出现 npm 404 → 判为包获取问题，提示落在包名/registry', () => {
+    const result = classifyMcpError(CLOSED, {
+      transport: 'stdio',
+      stderr: 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@scope%2fnope - Not found',
+    })
+    assert.equal(result.class, 'process_install')
+    assert.equal(result.retryable, false)
+    assert.match(result.suggestion, /package|registry|name/i)
+  })
+
+  it('stderr 出现 npm 缓存/解包失败 → 同归包获取问题（issue #77 的现场形态）', () => {
+    const result = classifyMcpError(CLOSED, {
+      transport: 'stdio',
+      stderr: 'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /tmp/_npx/abc/node_modules/minipass',
+    })
+    assert.equal(result.class, 'process_install')
+  })
+
+  it('stderr 为空 → 回落 process，不猜根因', () => {
+    const result = classifyMcpError(CLOSED, { transport: 'stdio', stderr: '' })
+    assert.equal(result.class, 'process')
+  })
+
+  it('stderr 有内容但无特征 → 仍回落 process（不把未知当已知）', () => {
+    const result = classifyMcpError(CLOSED, {
+      transport: 'stdio',
+      stderr: 'some unrelated log line the server printed before dying',
+    })
+    assert.equal(result.class, 'process')
+  })
+
+  it('remote 传输不参与 stderr 细分（那是本地子进程才有的证据）', () => {
+    const result = classifyMcpError(CLOSED, {
+      transport: 'remote',
+      stderr: 'npm error enoent spawn cmd ENOENT',
+    })
+    assert.equal(result.class, 'network', 'remote 的 -32000 保持可重试语义')
+    assert.equal(result.retryable, true)
+  })
+})

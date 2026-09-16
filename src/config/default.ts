@@ -30,28 +30,24 @@ export const DEFAULT_CONFIG: Config = {
           {
             id: 'claude-opus-4-8',
             // alias 用实际后端名，消除迷惑。id 不可改（代理按 id 路由）。
-            alias: 'qwen37-max',
             contextWindow: 1_000_000,
             maxTokens: 128000,
             reasoningEffort: 'max',
           },
           {
             id: 'claude-opus-4-7',
-            alias: 'opus-4-7',
             contextWindow: 1_000_000,
             maxTokens: 128000,
             reasoningEffort: 'max',
           },
           {
             id: 'claude-opus-4-6',
-            alias: 'opus-4-6',
             contextWindow: 1_000_000,
             maxTokens: 128000,
             reasoningEffort: 'max',
           },
           {
             id: 'claude-sonnet-4-5',
-            alias: 'sonnet-4-5',
             contextWindow: 1_000_000,
             maxTokens: 128000,
             reasoningEffort: 'max',
@@ -260,6 +256,9 @@ export const DEFAULT_CONFIG: Config = {
   ui: {},
   // 项目验证命令声明 — 默认空，由项目层 .rivet-config.json 覆盖（/init 生成）
   verify: {},
+  // 工作区策略（issue #147）：空对象 = 不改旧行为——未指定目录的会话仍落到
+  // sidecar 的 defaultCwd（process.cwd()），与 workspaceMode 缺省语义一致。
+  workspace: {},
   tools: {},
   // 前缀档位：空对象 = 走 schema 默认（standard）。这里刻意不写死 profile，
   // 让「无配置 = 现状」这一不变量只有一个来源（block-policy.resolvePromptBlocks）。

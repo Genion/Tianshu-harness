@@ -25,7 +25,7 @@
  */
 export const PROTOCOL_VERSION = 1
 
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted'
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted' | 'interrupted'
 
 /**
  * S — autonomy level. Canonical wire definition; the agent runtime re-exports
@@ -58,9 +58,10 @@ export type SessionEventType =
   | 'turn_complete'
   | 'phase'
   // Zen Mode（禅模式）相位镜像：data: { phase:'zen'|'full', reason?, armed,
-  // zenTurns }。run 开始与每次晋升各发一次。**消费端待实现**：桌面端当前未订阅
-  // zen_phase（2026-09-13 核查 desktop/ 零命中；TUI 徽章走 zenBadgeProvider 回调，
-  // 不经过此事件）——补桌面消费或改此注释二选一，勿再用现在时描述。
+  // zenTurns }。run 开始与每次晋升各发一次。桌面端已订阅（2026-09-14 接入）：
+  // 实时事件在 desktop/src/state/event-reducer.ts 折叠为相位徽章，重连由 /stream
+  // 建连补发（见 SessionRecord.zenPhaseMirror）；TUI 徽章另走 zenBadgeProvider
+  // 回调，不经过此事件。
   | 'zen_phase'
   | 'checkpoint'
   | 'approval_required'
@@ -184,6 +185,17 @@ export interface SessionRecord {
   createdAt: number
   updatedAt: number
   cwd: string
+  /**
+   * 工作目录的来源（issue #147）：'explicit' 用户选的目录 | 'config-default'
+   * 配置的默认工作区 | 'scratch' 临时会话隔离目录 | 'runtime-default' sidecar
+   * 的兜底 cwd。桌面端据此明示「这个会话的工作目录是谁定的」。
+   *
+   * 与 src/server/workspace.ts 的 WorkspaceSource 同构而非 import——本模块是
+   * 零依赖叶子（见文件头 HARD CONSTRAINT）。两侧一致性由 session-manager 的
+   * 赋值处做编译期校验（record.workspaceSource = resolveWorkspace(...).source）。
+   * 旧索引文件缺该字段 → undefined（桌面端按「未标注」渲染）。
+   */
+  workspaceSource?: 'explicit' | 'config-default' | 'scratch' | 'runtime-default'
   title?: string
   currentPhase?: string
   /**

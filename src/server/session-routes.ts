@@ -32,7 +32,6 @@
  *   POST   /github/prs/:number/push-fix                push auto-fix diff to PR head (confirm-gated)
  */
 import { decodeRouteParam, type RouteHandler } from './index.js'
-import { isAuthorizedRequest } from './auth.js'
 import { allowedCorsOrigin } from './cors.js'
 import type { SseConnectionRegistry } from './sse-registry.js'
 import { SseStream } from './sse-stream.js'
@@ -45,6 +44,7 @@ import type { PlanDocument } from '../plan/plan-store.js'
 import type { Config } from '../config/schema.js'
 import type { SessionEvent, SessionRecord } from './protocol.js'
 import { compactReplayRuns, compactReplayRunsWithStats, isReplayCompactionEnabled } from './replay-compaction.js'
+import { isSessionWorkspaceMode, type SessionWorkspaceMode } from './workspace.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
 import { getRollbackPreview, rollbackToCheckpoint, makeOwnershipGuard } from '../agent/checkpoint.js'
 import { listProjectFiles, rankFiles, listDirEntries } from './file-list.js'
@@ -66,16 +66,11 @@ import { isProFeatureEnabled } from '../config/pro-license.js'
 import { searchSessionTranscripts } from './session-search.js'
 import { listCheckpoints, loadCheckpoint, buildResumeFromCheckpoint } from '../agent/wave-checkpoint.js'
 import { storePlan } from '../agent/plan-store.js'
-import {
-  TIANSHU_PROTOCOL_HEADER,
-  TIANSHU_PROTOCOL_VERSION,
-  parseDelegateKinds,
-} from './delegation-protocol.js'
+import { parseDelegateKinds } from './delegation-protocol.js'
 import { classifyModelSpecMiss } from './serve.js'
-
-const PROTOCOL_HEADERS: Record<string, string> = {
-  [TIANSHU_PROTOCOL_HEADER]: String(TIANSHU_PROTOCOL_VERSION),
-}
+import { withAuth } from './route-auth.js'
+import { buildStorageCleanupHandler } from './storage-cleanup-route.js'
+import { buildScratchRoutes } from './scratch-cleanup.js'
 
 export type ArtifactKind = 'plan' | 'task-list' | 'walkthrough' | 'diff' | 'screenshot' | 'test-result' | 'markdown' | 'html'
 
@@ -275,18 +270,6 @@ function planSummary(p: PlanDocument) {
   }
 }
 
-function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
-  return async (body, params, headers, res) => {
-    if (!isAuthorizedRequest({ body, headers }, apiToken)) {
-      return { status: 401, body: { error: 'Unauthorized' }, headers: PROTOCOL_HEADERS }
-    }
-    const result = await handler(body, params, headers, res)
-    // handled:true (SSE) sets its own headers; still stamp protocol on REST.
-    if (result.handled) return result
-    return { ...result, headers: { ...PROTOCOL_HEADERS, ...result.headers } }
-  }
-}
-
 const REPLAY_SLICE_EVENTS = 200
 const REPLAY_SLICE_MS = 4
 
@@ -345,7 +328,9 @@ export function buildSessionRoutes(
       // from SSE/stream issues. See docs/dev/render-debug-playbook.md.
       const __dbg = process.env.RIVET_DEBUG_RENDER === '1'
       const __t0 = __dbg ? Date.now() : 0
-      const data = (body ?? {}) as { cwd?: string; title?: string; prompt?: string; missionId?: string; approvalMode?: unknown; isolatedWorktree?: unknown; model?: string; domain?: string; reasoningEffort?: unknown; planMode?: unknown; askMode?: unknown; planAutoApproveUi?: unknown; images?: unknown; documents?: unknown }
+      const data = (body ?? {}) as { cwd?: string; workspaceMode?: unknown; title?: string; prompt?: string; missionId?: string; approvalMode?: unknown; isolatedWorktree?: unknown; model?: string; domain?: string; reasoningEffort?: unknown; planMode?: unknown; askMode?: unknown; planAutoApproveUi?: unknown; images?: unknown; documents?: unknown }
+      // issue #147 — 非法 workspaceMode 显式 400（静默降级会让客户端以为用了默认工作区）。
+      if (data.workspaceMode !== undefined && !isSessionWorkspaceMode(data.workspaceMode)) return { status: 400, body: { error: 'Invalid "workspaceMode" (explicit|default|scratch)' } }
       if (data.approvalMode !== undefined && !isApprovalMode(data.approvalMode)) {
         return { status: 400, body: { error: 'Invalid "approvalMode"' } }
       }
@@ -380,6 +365,7 @@ export function buildSessionRoutes(
       }
       const rec = manager.createSession({
         cwd: data.cwd,
+        workspaceMode: data.workspaceMode as SessionWorkspaceMode | undefined,
         title: data.title,
         prompt,
         images: imagesCheck.images,
@@ -471,6 +457,21 @@ export function buildSessionRoutes(
         return { status: 404, body: { error: 'Session not found' } }
       }
       return { status: 200, body: { id, planMode: data.state } }
+    }, apiToken),
+
+    // Zen Mode（禅模式）跳过读专注相位——等价 TUI `/fast`，桌面端没有 /fast 故走
+    // 这条（会话操作区与 /zen skip 命令共用）。晋升后 onZenPhaseChange 发 zen_phase
+    // 事件 + 落 record 镜像，前端不必自己改相位状态；未 arm/已晋升时 promoted:false
+    // 是如实报告（不是错误），前端据此提示「当前不是读专注相位」。
+    'POST /sessions/:id/zen': withAuth(async (body, params) => {
+      const id = params!.id!
+      const data = (body ?? {}) as { action?: unknown }
+      if (data.action !== 'skip') {
+        return { status: 400, body: { error: 'Invalid or missing "action" (skip)' } }
+      }
+      const res = await manager.skipZen(id)
+      if (!res) return { status: 404, body: { error: 'Session not found' } }
+      return { status: 200, body: { id, ...res } }
     }, apiToken),
 
     // Ask mode — toggle the session into pure read-only Q&A ('asking') or back
@@ -849,22 +850,14 @@ export function buildSessionRoutes(
       return { status: 200, body: manager.storageReport() }
     }, apiToken),
 
-    // Manual cleanup — irreversibly delete archived sessions' files. Body:
-    //   { ids?: string[] }          → delete exactly these (must be archived)
-    //   { olderThanDays?: number }  → keep only archived idle for ≥ N days
-    //   {}                          → delete ALL archived
-    // Active/running sessions are never affected (manager enforces this).
-    'POST /storage/cleanup': withAuth((body) => {
-      const data = (body ?? {}) as { ids?: unknown; olderThanDays?: unknown }
-      const opts: { ids?: string[]; olderThanMs?: number } = {}
-      if (Array.isArray(data.ids)) {
-        opts.ids = data.ids.filter((x): x is string => typeof x === 'string')
-      }
-      if (typeof data.olderThanDays === 'number' && data.olderThanDays >= 0) {
-        opts.olderThanMs = data.olderThanDays * 86_400_000
-      }
-      return { status: 200, body: manager.purgeArchived(opts) }
-    }, apiToken),
+    // Manual cleanup of archived sessions' files（解析与调用体在
+    // storage-cleanup-route.ts：本文件零缓冲，接缝外提腾出行数）。
+    'POST /storage/cleanup': buildStorageCleanupHandler(manager, apiToken),
+
+    // 临时会话隔离根（<rivetHome>/workspace）的占用一览与清理——issue #147 跟进：
+    // 临时会话目录此前只增不减、没有应用内清理路径。占用判定要读存活会话，
+    // 故与 /storage 同族挂在这里（体量在 scratch-cleanup.ts）。
+    ...buildScratchRoutes(manager, apiToken),
 
     'GET /sessions/:id': withAuth((_body, params) => {
       const rec = manager.getSession(params!.id!)
@@ -1265,7 +1258,7 @@ export function buildSessionRoutes(
       const mainTotalTokens = mainInput + mainOutput
       const mainProvider = mainModel
         ? Object.entries(providers).find(([, p]) =>
-            p.models?.some(m => m.id === mainModel || m.alias === mainModel),
+            p.models?.some(m => m.id === mainModel),
           )?.[0]
         : undefined
       const mainPricing = findModelPricing(providers, mainProvider, mainModel)

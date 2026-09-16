@@ -179,8 +179,8 @@ rivet
 git clone https://github.com/huiliyi37/Tianshu-Tui.git
 cd Tianshu-Tui
 npm install
-npm run build      # 生成 dist/main.js
-npm start          # 或：node dist/main.js
+npm run build      # 生成 dist/cli/entry.js
+npm start          # 或：node dist/cli/entry.js
 ```
 
 ### 3. Shell 자동완성 활성화（선택）
@@ -234,7 +234,7 @@ export DEEPSEEK_API_KEY=sk-xxx         # 或：环境变量（仅当前 shell �
 ### 5. 시작
 
 ```bash
-rivet            # 或：npm start / node dist/main.js
+rivet            # 或：npm start / node dist/cli/entry.js
 ```
 
 `〉` 프롬프트가 있는 TUI가 나타납니다. 요구사항을 입력하고 Enter를 누르면 됩니다.
@@ -911,11 +911,11 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI 렌더
 ### 빌드와 테스트
 
 ```bash
-npx tsc --noEmit                                    # 类型检查
+npm run typecheck                                    # 类型检查
 npm test                                             # 所有测试（16,000+ 用例）
 npm run build                                        # tsup 打包 + 原生/wasm 载荷落位
-node dist/main.js                                    # 启动 TUI
-node dist/main.js -p "fix the typo"                  # 无界面模式
+node dist/cli/entry.js                               # 启动 TUI
+node dist/cli/entry.js -p "fix the typo"             # 无界面模式
 ```
 
 ### 확장

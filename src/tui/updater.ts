@@ -13,11 +13,13 @@
  * 可用环境变量关闭启动检查：RIVET_NO_UPDATE_CHECK=1
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { execSync, spawn } from 'node:child_process'
 import { writeFileAtomicSync } from '../fs-atomic.js'
 import { rivetHome, updateCheckPath } from '../config/paths.js'
+// 包根解析的规范实现（跳过无 version 的包声明）——见 detectInstallRoot 注释。
+import { findInstallRoot, readInstallVersion } from '../cli/version.js'
 import { WinStreamDecoder } from '../platform.js'
 // 版本解析/比较拆到 ./semver.js 后仍需本地绑定（compareSemver 用于 hasUpdate 判定）。
 import { compareSemver, parseSemver, updateInstallSpec } from './semver.js'
@@ -155,23 +157,20 @@ function findPowerShell(): string | null {
 export { compareSemver, parseSemver, updateInstallSpec }
 
 /** 根据当前进程入口定位安装根目录（package.json 所在目录）。 */
-export function detectInstallRoot(): string | null {
-  const script = process.argv[1]
-  if (!script) return null
-  try {
-    const real = realpathSync(script)
-    let dir = dirname(real)
-    for (let i = 0; i < 20; i++) {
-      const pkg = join(dir, 'package.json')
-      if (existsSync(pkg)) return dir
-      const parent = dirname(dir)
-      if (parent === dir) break
-      dir = parent
-    }
-  } catch {
-    return null
-  }
-  return null
+/**
+ * 安装包根目录——向上找到最近的、**带 version 字段**的 package.json。
+ *
+ * 2026-09-16 回归修复（欢迎页版本号消失）：原实现是「向上找到第一个 package.json
+ * 就返回」，会被 `dist/package.json` 劫持——那是 stage-runtime-deps.js 为「dist
+ * 脱离仓库独立分发（桌面端 Resources/rivet-runtime）」写的 `{"type":"module"}`
+ * 纯 ESM 声明，没有 name/version。于是 root 变成 `<pkg>/dist`，下游全错：
+ *   - getCurrentVersion(root) → null → 欢迎页不渲染 `天枢 · vX.Y.Z`（main.ts 消费）
+ *   - readPackageName(root)   → null → 更新检查拿不到包名（checkForUpdate）
+ *   - detectInstallType(root) → 全局安装被误判为 local（路径含 node_modules 段）
+ * 语义统一到 cli/version.ts 的 findInstallRoot，两处版本解析不再各留一份实现。
+ */
+export function detectInstallRoot(scriptPath: string | undefined = process.argv[1]): string | null {
+  return findInstallRoot(scriptPath)
 }
 
 function readPackageName(root: string): string | null {
@@ -183,13 +182,9 @@ function readPackageName(root: string): string | null {
   }
 }
 
+/** 读指定包根的 version 字段——实现统一在 cli/version.ts（单一事实源）。 */
 export function getCurrentVersion(root: string): string | null {
-  try {
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as { version?: string }
-    return pkg.version ?? null
-  } catch {
-    return null
-  }
+  return readInstallVersion(root)
 }
 
 function pathsEqual(a: string, b: string): boolean {

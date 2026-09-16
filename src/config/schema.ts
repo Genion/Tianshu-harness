@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { mcpConfigSchema, type McpConfig } from '../mcp/config.js'
+import { workspaceConfigSchema, type WorkspaceConfig } from './workspace-schema.js'
 import { providerRetrySchema } from './retry-schema.js'
 import { imageGenModelSchema } from './image-gen-schema.js'
 
@@ -78,7 +79,9 @@ export function inferModelContextWindow(modelId: string): number | undefined {
 
 export const modelConfigSchema = z.object({
   id: z.string(),
-  alias: z.string().optional(),
+  /** 惯用短名（glm-53 / k27-code 等）2026-09 起废弃——模型一律按原 ID 保存
+   *  与展示。schema 不再声明该字段：旧配置/旧客户端传入的 alias 由 zod 默认
+   *  strip 掉，解析后不存在、永不落盘（存量剥除见 migrateStripModelAlias）。 */
   /** 擅长场景 — 展示在模型选择器（ModelPicker），预设定义处填充。 */
   description: z.string().optional(),
   /** Optional: absent → inferred from the model id ('-128k'/'-1m' suffix),
@@ -992,7 +995,7 @@ export const configSchema = z.object({
   env: envSchema,
   ui: uiSchema,
   verify: verifySchema,
-  /** 工具装配档位：minimal / frontend（默认）/ full / taiyi（16 评测档）。
+  workspace: workspaceConfigSchema,  /** 工具装配档位：minimal / frontend（默认）/ full / taiyi（16 评测档）。
    *  会话启动期解析，会话内冻结（前缀缓存安全）；RIVET_TOOL_PRESET env 优先于此配置。 */
   tools: z.object({
     preset: z.enum(['minimal', 'frontend', 'full', 'taiyi']).optional(),
@@ -1057,6 +1060,7 @@ export type Config = {
   env: EnvConfig
   ui: UiConfig
   verify: VerifyConfig
+  workspace: WorkspaceConfig
   tools: {
     preset?: 'minimal' | 'frontend' | 'full' | 'taiyi' | undefined
     /** Zen Mode（禅模式）原始配置；bootstrap 经 resolveZenConfig 物化后传给 AgentLoop。 */

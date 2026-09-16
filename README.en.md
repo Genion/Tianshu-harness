@@ -188,8 +188,8 @@ rivet
 git clone https://github.com/huiliyi37/Tianshu-Tui.git
 cd Tianshu-Tui
 npm install
-npm run build      # produces dist/main.js
-npm start          # or: node dist/main.js
+npm run build      # produces dist/cli/entry.js
+npm start          # or: node dist/cli/entry.js
 ```
 
 ### 3. Configure an API Key
@@ -209,7 +209,7 @@ export DEEPSEEK_API_KEY=sk-xxx         # or: environment variable (current shell
 ### 4. Launch
 
 ```bash
-rivet            # or: npm start / node dist/main.js
+rivet            # or: npm start / node dist/cli/entry.js
 ```
 
 You should see the TUI with a `〉` prompt. Type your request and press Enter.
@@ -812,11 +812,11 @@ Node.js 24 · TypeScript strict (`noUncheckedIndexedAccess`) · T9 ANSI renderin
 ### Build & Test
 
 ```bash
-npx tsc --noEmit                                    # typecheck
+npm run typecheck                                    # typecheck
 npm test                                             # all tests (16,000+ cases)
 npm run build                                        # tsup bundle + staged native/wasm payload
-node dist/main.js                                    # launch TUI
-node dist/main.js -p "fix the typo"                  # headless mode
+node dist/cli/entry.js                               # launch TUI
+node dist/cli/entry.js -p "fix the typo"             # headless mode
 ```
 
 ### Extending

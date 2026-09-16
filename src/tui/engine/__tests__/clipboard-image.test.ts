@@ -267,3 +267,28 @@ test('TIFF→sips 转换守卫看注入的 platform 而非 process.platform（ub
     Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
   }
 })
+
+// ── looksLikeBinaryPaste：粘贴文本的乱码判定（决定是否为它去读剪贴板） ──
+
+test('looksLikeBinaryPaste：正常文本一律 false（否则普通粘贴会被拖进 0.5s 读图路径）', async () => {
+  const { looksLikeBinaryPaste } = await import('../clipboard-image.js')
+  const normal = [
+    'hello world',
+    'const a = 1\nconst b = 2',
+    '第一行 🎉\r\nsecond line',
+    'if (x <= 0x9f) return true;',
+    'emoji 代理对：👨‍👩‍👧‍👦',
+    '',
+  ]
+  for (const t of normal) {
+    assert.equal(looksLikeBinaryPaste(t), false, `正常文本误判为乱码: ${JSON.stringify(t)}`)
+  }
+})
+
+test('looksLikeBinaryPaste：解码残渣一律 true（防乱码防御的触发条件）', async () => {
+  const { looksLikeBinaryPaste } = await import('../clipboard-image.js')
+  assert.equal(looksLikeBinaryPaste('\ufffd'), true, 'U+FFFD 是 UTF-8 解码失败标记')
+  assert.equal(looksLikeBinaryPaste('abc\ufffddef'), true, '混在文本中的 FFFD 也要命中')
+  assert.equal(looksLikeBinaryPaste('\u0080\u009f'), true, 'C1 控制符（单字节解释残渣）')
+  assert.equal(looksLikeBinaryPaste('\ue000'), true, '私用区')
+})

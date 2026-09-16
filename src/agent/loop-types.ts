@@ -351,6 +351,10 @@ export interface AgentCallbacks {
    *  desktop 用它把“给系统的自检回复”与“给用户的交付文本”区分开。 */
   onTurnComplete: (usage: Partial<Usage>, turnNumber: number, isFinal?: boolean, evidenceSummary?: EvidenceSummary, continuationReason?: string) => void
   onError: (error: Error) => void
+  /** 流错误终结本 run（超时/网络——非用户中断，AbortError 不走此回调）：server
+   *  据此把会话终态记为 'interrupted' 而非 'completed'（2026-09-16 终态语义修复）。
+   *  可选：轻量测试替身无需实现——缺省等价于修复前行为（completed）。 */
+  onStreamInterrupted?: (error: Error) => void
   onAbort: (reason?: string) => void
   onApprovalRequired: (id: string, name: string, input: Record<string, unknown>) => Promise<ApprovalResult | boolean>
   onCheckpoint?: (hash: string) => void

@@ -76,6 +76,50 @@ export function resolveNpmCliCommand(
 }
 
 /**
+ * 基座 PATH 读不到时的系统目录兜底。
+ *
+ * 为什么需要：npx/npm 解析与安装包时要 spawn `cmd.exe`（Windows）或 `/bin/sh`，
+ * 它们在系统目录里，不在 node 目录里。旧实现只把 PATH 写成 nodeDir，于是「基座
+ * 没给 PATH」会静默退化成「子进程只能看到一个目录」，失败方式是秒退 + 一句
+ * -32000，完全看不出根因（issue #149 的对照实验：PATH 只有 node 目录 → npx
+ * 全部 `spawn cmd ENOENT`；补上 System32 后全部成功）。
+ *
+ * 基座 PATH 的完整性由注入的 getDefaultEnvironment 决定——MCP SDK 的
+ * DEFAULT_INHERITED_ENV_VARS 白名单在版本间动过（1.29.0 的 win32 列表含 PATH，
+ * 更早的版本不含），本仓库不该把子进程能否启动押在第三方的白名单上。
+ *
+ * 读 SystemRoot 而不是硬写 C:\Windows：装到非系统盘的机器上硬写会让兜底本身失效。
+ * POSIX 不兜底——那里 PATH 缺失罕见，且猜 /bin:/usr/bin 反而可能覆盖掉调用方的
+ * 精心配置。
+ */
+function systemPathFallback(platform: NodeJS.Platform, base: Record<string, string>): string[] {
+  if (platform !== 'win32') return []
+  const root = (base.SystemRoot ?? base.SYSTEMROOT ?? process.env.SystemRoot ?? 'C:\\Windows')
+    .replace(/[\\/]+$/, '')
+  return [`${root}\\System32`, root, `${root}\\System32\\Wbem`]
+}
+
+/**
+ * 会被 Windows 文件关联「打开」而非执行的脚本宿主扩展。cmd 按 PATHEXT 匹配到
+ * 这些扩展即走 ShellExecute（.js → 记事本、.vbs → WSH…），是 issue #149
+ * 根因 B 的介质：`cmd /d /s /c <bin名>` 在 CWD 优先搜索时被同名 .js 拦下，
+ * PATH 里的 .cmd shim 永远到不了。
+ */
+const SCRIPT_HOST_EXTS = new Set(['.JS', '.JSE', '.VBS', '.VBE', '.WSF', '.WSH', '.MSC'])
+
+/** 剔除脚本宿主扩展后的安全 PATHEXT——保留 COM/EXE/BAT/CMD 这些真正可执行的
+ *  形态（npx 的 .cmd shim 正是靠 .CMD 命中）。 */
+const SAFE_PATHEXT = '.COM;.EXE;.BAT;.CMD'
+
+/** 剔除 PATHEXT 里的脚本宿主扩展；空/缺失/全被剔时给安全默认值。 */
+function sanitizePathext(value: string | undefined): string {
+  const base = value?.trim() ? value : SAFE_PATHEXT
+  const kept = base.split(';').map(s => s.trim()).filter(Boolean)
+    .filter(ext => !SCRIPT_HOST_EXTS.has(ext.toUpperCase()))
+  return kept.length > 0 ? kept.join(';') : SAFE_PATHEXT
+}
+
+/**
  * Build an env object for MCP stdio transports: always explicit, with the
  * hosting Node directory prepended to PATH so npx-cli can find the same node.
  * User-supplied env is merged, but nodeDir is written last onto PATH.
@@ -103,9 +147,22 @@ export function buildStdioEnvWithNodePath(
   const pathSep = platform === 'win32' ? ';' : ':'
   const nodeDir = p.dirname(execPath)
   const pathRest = user.PATH ?? user.Path ?? base.PATH ?? base.Path ?? ''
-  return {
-    ...base,
-    ...user,
-    PATH: pathRest ? `${nodeDir}${pathSep}${pathRest}` : nodeDir,
+  const fallback = pathRest ? [] : systemPathFallback(platform, base)
+  const merged = { ...base, ...user }
+  const env: Record<string, string> = {
+    ...merged,
+    PATH: [nodeDir, ...(pathRest ? [pathRest] : fallback)].join(pathSep),
   }
+  if (platform === 'win32') {
+    // issue #149 根因 B：npx 分发的 bin 由 `cmd /d /s /c <bin名>` 执行，cmd 按
+    // PATHEXT 在 CWD 优先匹配——CWD 里的同名 .js 会被文件关联「打开」（记事本），
+    // PATH 里的 .cmd shim 永远到不了，子进程秒退 -32000。剔除脚本宿主扩展后
+    // cmd 只认真正可执行的扩展。
+    // 注意："基座未给 PATHEXT"是常态而非边角：SDK 1.29.0 的 win32 白名单不含
+    // PATHEXT（子进程 env 无此变量 → cmd 回落系统默认——含 .JS，正是缺陷介质），
+    // 显式补安全默认即主修复路径；带值的场景来自 server 自定义 env / 应用设置。
+    delete env.Pathext
+    env.PATHEXT = sanitizePathext(merged.PATHEXT ?? merged.Pathext)
+  }
+  return env
 }

@@ -4,6 +4,7 @@ import type { Tool } from '../tools/types.js'
 import type { McpConfig, McpServerConfig } from './config.js'
 import type { McpConnectionState, McpTransportType } from './types.js'
 import { createMcpToolWrapper, createMcpConnectorConsent, type McpConnectorConsent } from './wrapper.js'
+import { readSubAgentWorkspacePolicy, subAgentScratchRoot, workspaceDeclarationFor } from './workspace-policy.js'
 import { classifyMcpError } from './failure-classifier.js'
 import { createTransport, type TransportResult } from './transport-factory.js'
 import { LogRingBuffer } from './log-buffer.js'
@@ -38,7 +39,9 @@ function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs: number): 
 
 function formatConnectError(err: unknown, stderrTail: string, context?: { transport?: 'stdio' | 'remote' }): string {
   const base = err instanceof Error ? err.message : String(err)
-  const classified = classifyMcpError(err, context)
+  // 分类必须拿到 stderr——否则这里拼进去的是通用建议，而同一个 state 上的
+  // errorHint 却是细分结果，两个字段对同一故障给出不同诊断。
+  const classified = classifyMcpError(err, { ...context, stderr: stderrTail })
   const parts = [base]
   if (stderrTail) {
     const compact = stderrTail.replace(/\n+/g, ' | ').slice(0, 500)
@@ -46,6 +49,25 @@ function formatConnectError(err: unknown, stderrTail: string, context?: { transp
   }
   if (classified.suggestion) parts.push(classified.suggestion)
   return parts.join(' — ')
+}
+
+/**
+ * 断连/崩溃的一句话诊断（issue #148 建议 2）。
+ *
+ * stdio 走分类器：stderr 决定它是环境问题、包问题还是未知，用户据此知道该改配置
+ * 还是该报 bug。remote 是网络语义，不套 stderr。**空 stderr 不硬凑**——不知道就
+ * 说不知道，编一个「可能是网络问题」只会把人带偏。
+ */
+function describeTransportLoss(transport: McpTransportType, stderrTail: string): string {
+  if (transport !== 'stdio') return 'connection lost'
+  const tail = stderrTail.trim()
+  if (!tail) return 'server process exited (no stderr captured)'
+  const classified = classifyMcpError(new Error('MCP server process exited'), {
+    transport: 'stdio',
+    stderr: tail,
+  })
+  const compact = tail.replace(/\n+/g, ' | ').slice(0, 300)
+  return `server process exited; stderr: ${compact} — ${classified.suggestion}`
 }
 
 export interface McpToolDef {
@@ -73,7 +95,14 @@ export class McpManager {
   private states: Map<string, McpConnectionState> = new Map()
   private tools: Tool[] = []
   private timeoutMs: number
-  // Per-server reconnect attempt counter (for remote transports).
+  /**
+   * 正在被主动关闭的 server——重连钩子据此早退，避免 shutdown 与自己打架。
+   * 用标记而不是把 transport.onclose 置空：置空会连带丢掉 Protocol 在
+   * client.connect() 期间包的那层清理（reject 在途请求、翻 closed 标志），
+   * 在途请求就悬挂了。标记在下一次 _connectServer 成功时清掉。
+   */
+  private suppressReconnect = new Set<string>()
+  // Per-server reconnect attempt counter (both stdio and remote transports can drop).
   private reconnectAttempts: Map<string, number> = new Map()
   // Reconnect timer handles — cleared on shutdown to prevent reconnect-after-close.
   private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -84,8 +113,18 @@ export class McpManager {
   private connectLocks: Map<string, Promise<Tool[]>> = new Map()
   // Shared across all wrappers: first use of each connector requires explicit opt-in.
   private connectorConsent: McpConnectorConsent = createMcpConnectorConsent()
+  /**
+   * 工具面变化通知——重连恢复后必须把新工具推给宿主。
+   *
+   * 为什么不能省：宿主侧（session-manager.injectMcpTools）是**主动推送**语义
+   * ——已经有 live agent 的会话不会自己去 manager 拉工具面（只有新建 agent 才
+   * 经 buildSessionStores 拉一次）。不推的话，重连的可见结果只是「状态变绿了，
+   * 会话里的 mcp__* 工具依然不在」，等于白连。
+   */
+  private readonly onToolsChanged?: (tools: Tool[]) => void
 
-  constructor(config: McpConfig) {
+  constructor(config: McpConfig, opts: { onToolsChanged?: (tools: Tool[]) => void } = {}) {
+    this.onToolsChanged = opts.onToolsChanged
     this.config = config
     this.timeoutMs = config.timeoutMs ?? DEFAULT_MCP_TIMEOUT_MS
   }
@@ -157,6 +196,13 @@ export class McpManager {
   }
 
   async shutdown(): Promise<void> {
+    // 抑制重连必须**先于** close：关 transport 会触发 onclose 钩子，不抑制的话
+    // 钩子会把子进程重新拉起来——shutdown 反倒制造出一个新进程，把短命进程
+    // （测试、CLI 的一次性连接）吊住不退出（实测：shutdown 后仍有
+    // ChildProcess exitCode=null 活着 5 秒以上）。
+    // 这个坑对 remote 同样存在（它的 onclose 一直是我们挂的），只是 stdio 接上
+    // 重连之后才在测试里显形。
+    for (const serverId of this.connections.keys()) this.suppressReconnect.add(serverId)
     // Clear pending reconnect timers before closing transports.
     for (const [, timer] of this.reconnectTimers) clearTimeout(timer)
     this.reconnectTimers.clear()
@@ -211,8 +257,11 @@ export class McpManager {
     if (timer) { clearTimeout(timer); this.reconnectTimers.delete(serverId) }
     const conn = this.connections.get(serverId)
     if (conn) {
-      // Remove onclose handler to avoid reconnect fighting with shutdown.
-      conn.transport.onclose = undefined
+      // 抑制重连用标记，而不是把 onclose 置空——置空会连带丢掉 Protocol 的
+      // 清理（client.connect() 期间包的那层）。标记不在这里清：close() 之后的
+      // onclose 是异步（子进程 'close' 事件）触发的，此处清掉它就等于没抑制。
+      // 下一次 _connectServer 成功时会清。
+      this.suppressReconnect.add(serverId)
       try { await conn.transport.close() } catch { /* best-effort */ }
       this.connections.delete(serverId)
     }
@@ -287,6 +336,9 @@ export class McpManager {
             } catch (err) {
               const classified = classifyMcpError(err, {
                 transport: server.transportType === 'stdio' ? 'stdio' : 'remote',
+                // 调用期崩掉时 stderr 是唯一能说明「为什么」的证据——PATH / 包 /
+                // 未知三种根因在 err.message 上是同一句 -32000。
+                stderr: server.stderrTail?.(),
               })
               const current = this.states.get(serverId)
               this.states.set(serverId, {
@@ -305,6 +357,9 @@ export class McpManager {
               throw err
             }
           }
+          // issue #147 — 工作区处置：内置声明对已知 server 开箱生效（tianshu-mcp），
+          // 用户配置可覆盖；策略取连接期快照（改配置后重连该 server 即生效）。
+          const workspaceDeclaration = workspaceDeclarationFor(serverId, serverConfig.workspace)
           return createMcpToolWrapper(
             serverId,
             mcpDef,
@@ -312,6 +367,13 @@ export class McpManager {
             this.connectorConsent,
             serverConfig.policy?.tools[mcpDef.name],
             server.transportType === 'stdio' ? 'stdio' : 'remote',
+            workspaceDeclaration
+              ? {
+                  declaration: workspaceDeclaration,
+                  policy: readSubAgentWorkspacePolicy(),
+                  scratchRoot: subAgentScratchRoot(),
+                }
+              : undefined,
           )
         })
 
@@ -333,7 +395,13 @@ export class McpManager {
         throw err
       }
     } catch (err) {
-      const classified = classifyMcpError(err, { transport: transport === 'stdio' ? 'stdio' : 'remote' })
+      // stderrTail 在上面 _connectServer 成功后就已取出（L259）——此前只喂给了
+      // formatConnectError，没喂给分类器：于是 PATH 缺失 / 包不存在 / 缓存损坏
+      // 三种根因全部回落成同一句通用提示（issue #149 要拆的正是这里）。
+      const classified = classifyMcpError(err, {
+        transport: transport === 'stdio' ? 'stdio' : 'remote',
+        stderr: stderrTail,
+      })
       // One automatic backoff retry for transient/network failures.
       if (classified.retryable && attempt === 0) {
         await new Promise((r) => setTimeout(r, NETWORK_RETRY_DELAY_MS))
@@ -429,11 +497,32 @@ export class McpManager {
       }
     }
 
-    // Register onclose handler for auto-reconnect on remote transports.
-    // stdio transport death is terminal (process exited).
-    if (result.transportType !== 'stdio' && process.env.RIVET_MCP_RECONNECT !== '0') {
+    // Register onclose handler for auto-reconnect — for BOTH transports.
+    //
+    // 这里曾对 stdio 短路（原注释：「stdio transport death is terminal」）。子进程
+    // 退出确实是终态，但重启它并不难，而把它排除在外的代价是「一次崩溃 = 永久
+    // 失效且无声」：杀掉子进程后十分钟无反应、UI 仍显示 Not connected（issue
+    // #148）。重连机制本身一直是好的（remote 走通了 degraded → 重连成功），
+    // 只是 stdio 从没接上它。
+    //
+    // 必须链式保留 prevOnclose：client.connect() 期间 Protocol 会把
+    // transport.onclose 包一层（shared/protocol.js 里 `_onclose?.(); this._onclose();`
+    // ——后者 reject 在途请求、翻 closed 标志）。直接覆盖等于把这套清理整段丢掉，
+    // 在途请求会悬挂。这一点对 remote 同样成立，此前也是直接覆盖的。
+    //
+    // 新连接建立即清掉上一轮 shutdown 留下的抑制标记（否则重启后的新钩子会
+    // 继承旧标记、再也不重连）。
+    this.suppressReconnect.delete(serverId)
+    if (process.env.RIVET_MCP_RECONNECT !== '0') {
+      const prevOnclose = result.transport.onclose
+      const stderrTail = result.stderrTail
       result.transport.onclose = () => {
-        this._onTransportClosed(serverId, cfg)
+        prevOnclose?.()
+        if (this.suppressReconnect.has(serverId)) return
+        this._onTransportClosed(serverId, cfg, {
+          transport: result.transportType,
+          stderrTail: stderrTail?.() ?? '',
+        })
       }
     }
 
@@ -447,20 +536,33 @@ export class McpManager {
   }
 
   /**
-   * Auto-reconnect handler for remote (URL-based) transport disconnections.
-   * Uses exponential backoff: 2s, 4s, 8s, up to RECONNECT_MAX_ATTEMPTS.
-   * Disabled when RIVET_MCP_RECONNECT=0.
+   * Auto-reconnect handler for transport disconnections — stdio 子进程退出与
+   * remote 长连接断开走同一条路。指数退避 2s / 4s / 8s，至多
+   * RECONNECT_MAX_ATTEMPTS 次；RIVET_MCP_RECONNECT=0 关闭。
+   *
+   * context 携带崩溃现场（哪个传输、stderr 尾部）。状态里光有
+   * 「Reconnecting (attempt 1/3)…」不够——用户得知道**为什么**断的，否则
+   * 「崩溃」与「配置写错了」在界面上长得一模一样（issue #148 建议 2）。
    */
-  private _onTransportClosed(serverId: string, cfg: McpServerConfig): void {
+  private _onTransportClosed(
+    serverId: string,
+    cfg: McpServerConfig,
+    context?: { transport?: McpTransportType; stderrTail?: string },
+  ): void {
+    // transport 不能硬编码：stdio server 走这条路时状态里写 streamableHttp，
+    // 设置页的「传输」列就显示错了。
+    const transport = context?.transport ?? (cfg.command ? 'stdio' : 'streamableHttp')
     const attempts = this.reconnectAttempts.get(serverId) ?? 0
+    const diag = describeTransportLoss(transport, context?.stderrTail ?? '')
+
     if (attempts >= RECONNECT_MAX_ATTEMPTS) {
       const current = this.states.get(serverId)
       this.states.set(serverId, {
         serverId,
-        transport: 'streamableHttp',
+        transport,
         status: 'error',
         toolCount: current?.toolCount ?? 0,
-        error: `Reconnect failed after ${RECONNECT_MAX_ATTEMPTS} attempts`,
+        error: `Reconnect failed after ${RECONNECT_MAX_ATTEMPTS} attempts — ${diag}`,
         lastConnectedAt: current?.lastConnectedAt,
         lastErrorAt: Date.now(),
       })
@@ -474,10 +576,10 @@ export class McpManager {
     const current = this.states.get(serverId)
     this.states.set(serverId, {
       serverId,
-      transport: 'streamableHttp',
+      transport,
       status: 'degraded',
       toolCount: current?.toolCount ?? 0,
-      error: `Reconnecting (attempt ${attempts + 1}/${RECONNECT_MAX_ATTEMPTS})…`,
+      error: `Reconnecting (attempt ${attempts + 1}/${RECONNECT_MAX_ATTEMPTS})… — ${diag}`,
       lastConnectedAt: current?.lastConnectedAt,
       lastErrorAt: Date.now(),
     })
@@ -486,6 +588,9 @@ export class McpManager {
       this.reconnectTimers.delete(serverId)
       try {
         await this._connectAndDiscover(serverId, cfg, /*attempt*/ 0)
+        // 重连成功后把工具面推给宿主：manager 这边恢复了，宿主那边的会话若还是
+        // 崩之前的列表（或已清空），用户看到的仍是「工具没了」。
+        this.onToolsChanged?.(this.getAllTools())
       } catch {
         // Error already recorded by _connectAndDiscover.
       }

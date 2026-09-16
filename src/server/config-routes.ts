@@ -26,6 +26,8 @@
  *   PUT    /config/vision-model             set/clear the vision bridge
  *   GET    /config/vision-auto-bridge       auto-pick a vision bridge when unconfigured (opt-in)
  *   PUT    /config/vision-auto-bridge       toggle the auto-bridge opt-in
+ *   GET    /config/zen                      Zen Mode (read-focus opening) switch; default off
+ *   PUT    /config/zen                      toggle Zen Mode (explicit opt-in; next session)
  */
 import { decodeRouteParam, type RouteHandler } from './index.js'
 import { isAuthorizedRequest } from './auth.js'
@@ -83,6 +85,7 @@ import {
   getDeliveryConfig,
   setDeliveryConfig,
 } from '../config/manager.js'
+import { buildWorkspaceRoutes } from './workspace-route.js'
 import { applyConfiguredPathGrants, listPersistedGrants, revokeGrant } from '../tools/path-grants.js'
 import { expandHome } from '../platform.js'
 import { resolve, isAbsolute } from 'node:path'
@@ -152,9 +155,10 @@ function parseImageGenRequest(body: unknown, options: { requireProviderName?: bo
 }
 import { probeForTestKey, matchModelDefaults } from './provider-probe-adapter.js'
 import { buildProviderKeyRoutes } from './config-routes-keys.js'
+import { buildZenRoutes } from './config-routes-zen.js'
 import { listProviderKeys, type ProviderKeyListItem } from '../config/provider-key-store.js'
 import { contractModels } from '../config/contract-models.js'
-import { resolveApiKey } from '../api/factory.js'
+import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
 import { getDeepSeekUserSummary, getDeepSeekCostReport } from '../api/deepseek-platform-client.js'
 import { listGrantedApps, revokeApp } from '../tools/computer-use/app-grants.js'
 import { computerUseModulePresent, isComputerUseSupportedPlatform, loadComputerUseImpl } from '../tools/computer-use/bridge.js'
@@ -191,6 +195,18 @@ function resolveProviderProbeTarget(
     const stored = loadConfig().provider.providers[provider]
     if (stored) {
       try { resolvedKey = resolveApiKey(stored) } catch { resolvedKey = undefined }
+      // A′ 迁移后的主流形态：key 池在 provider.keys[]（keyRef 指向 secrets.json），
+      // provider 顶层槽位全空——resolveApiKey 只读顶层三槽，多 key 用户在此落空，
+      // 表现为「测试模型调用」永远 400 'apiKey is required'（UI 只有 toast 一闪）。
+      // 回退 keys[0]：与 default 判定（current 判定 keyId 全程）同口径——探测用主 key。
+      if (!resolvedKey) {
+        const firstKey = stored.keys?.[0]
+        if (firstKey) {
+          try {
+            resolvedKey = resolveCredentialKey({ name: provider, keyRef: firstKey.keyRef, apiKey: firstKey.apiKey, apiKeyEnv: firstKey.apiKeyEnv })
+          } catch { resolvedKey = undefined }
+        }
+      }
     }
   }
   if (!resolvedKey && !opts?.allowKeyless) return { error: 'apiKey is required (or set a key on the provider first)' }
@@ -282,6 +298,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     try { hooks?.onProviderConfigChanged?.() } catch { /* best-effort */ }
   }
   return {
+    ...buildWorkspaceRoutes(apiToken),
     'GET /config/providers': withAuth(() => {
       const cfg = loadConfig()
       const defaultName = cfg.provider.default
@@ -303,7 +320,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           // keyStatus 恒 none 的 keyless 端点靠本标记与「该配没配」区分。
           keyless: isKeylessProviderEntry(name, p),
           // 无 keys 才回退顶层快照——见 contractModels 的注释。
-          models: contractModels(p).map(m => ({ id: m.id, alias: m.alias, description: m.description, contextWindow: m.contextWindow, maxTokens: m.maxTokens, supportsVision: m.supportsVision, supportsImageGen: m.supportsImageGen })),
+          models: contractModels(p).map(m => ({ id: m.id, description: m.description, contextWindow: m.contextWindow, maxTokens: m.maxTokens, supportsVision: m.supportsVision, supportsImageGen: m.supportsImageGen })),
           keys: listProviderKeys(name, p),
           isPreset: preset !== undefined,
           // 预设模型全集——UI 标注「预设含 N 个模型」（配置快照经
@@ -734,6 +751,10 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         return { status: 400, body: { error: (err as Error).message } }
       }
     }, apiToken),
+
+    // Zen Mode（禅模式 / 读专注开局）——用户显式开关，默认关（opt-in）。
+    // 本文件零行预算，路由住在 config-routes-zen.ts，以 spread 接入（同多 key 池）。
+    ...buildZenRoutes(apiToken),
 
     // Runtime lean profile — expands into minimal tools / lean prompt / no
     // embeddings / tighter session pool. Takes effect next session (pool caps

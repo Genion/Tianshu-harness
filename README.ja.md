@@ -179,8 +179,8 @@ rivet
 git clone https://github.com/huiliyi37/Tianshu-Tui.git
 cd Tianshu-Tui
 npm install
-npm run build      # dist/main.js を生成
-npm start          # または：node dist/main.js
+npm run build      # dist/cli/entry.js を生成
+npm start          # または：node dist/cli/entry.js
 ```
 
 ### 3. Shell 補完を有効化（任意）
@@ -234,7 +234,7 @@ export DEEPSEEK_API_KEY=sk-xxx         # または：環境変数（現在のシ
 ### 5. 起動
 
 ```bash
-rivet            # または：npm start / node dist/main.js
+rivet            # または：npm start / node dist/cli/entry.js
 ```
 
 `〉` プロンプト付きの TUI が表示されます。要件を入力して Enter を押せば実行されます。
@@ -908,11 +908,11 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI レン
 ### ビルドとテスト
 
 ```bash
-npx tsc --noEmit                                    # 型チェック
+npm run typecheck                                    # 型チェック
 npm test                                             # すべてのテスト（16,000+ ケース）
 npm run build                                        # tsup バンドル＋ネイティブ/wasm ペイロード配置
-node dist/main.js                                    # TUI 起動
-node dist/main.js -p "fix the typo"                  # ヘッドレスモード
+node dist/cli/entry.js                               # TUI 起動
+node dist/cli/entry.js -p "fix the typo"             # ヘッドレスモード
 ```
 
 ### 拡張
