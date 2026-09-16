@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -2025,86 +2025,4 @@ test('stall-observer: run 收尾 done 落盘后会话进入 idle（交付后等�
   } finally {
     clearActivity(s.id)
   }
-})
-
-// ── issue #147：工作区模式（workspaceMode）──────────────────────────────────
-// 三条落点 + 显式优先。缺省分支是最重要的反证：它必须与改造前逐字节一致。
-
-/** 隔离环境变量（RIVET_HOME / RIVET_CONFIG_PATH）后执行，退出时复原。 */
-function withIsolatedHome(fn: (home: string) => void): void {
-  const prevHome = process.env.RIVET_HOME
-  const prevConfig = process.env.RIVET_CONFIG_PATH
-  const home = mkdtempSync(join(tmpdir(), 'rivet-ws-'))
-  process.env.RIVET_HOME = home
-  process.env.RIVET_CONFIG_PATH = join(home, 'config.json')
-  try {
-    fn(home)
-  } finally {
-    if (prevHome === undefined) delete process.env.RIVET_HOME
-    else process.env.RIVET_HOME = prevHome
-    if (prevConfig === undefined) delete process.env.RIVET_CONFIG_PATH
-    else process.env.RIVET_CONFIG_PATH = prevConfig
-    rmSync(home, { recursive: true, force: true })
-  }
-}
-
-test('createSession: 缺省 workspaceMode = 改造前行为（落 defaultCwd，runtime-default）', () => {
-  withIsolatedHome(() => {
-    const { manager } = makeManager()
-    const rec = manager.createSession({})
-    assert.equal(rec.cwd, '/tmp/work')
-    assert.equal(rec.workspaceSource, 'runtime-default')
-  })
-})
-
-test("createSession: workspaceMode='scratch' 落 <rivetHome>/workspace/<短id> 且目录已创建", () => {
-  withIsolatedHome((home) => {
-    const { manager } = makeManager()
-    const rec = manager.createSession({ workspaceMode: 'scratch' })
-    assert.equal(rec.cwd, join(home, 'workspace', rec.id.slice(0, 8)))
-    assert.equal(rec.workspaceSource, 'scratch')
-    assert.ok(existsSync(rec.cwd), '临时会话目录必须已创建，否则 agent 无处落盘')
-  })
-})
-
-test("createSession: workspaceMode='default' 未配 defaultDir → 回落 defaultCwd（不让新建失败）", () => {
-  withIsolatedHome(() => {
-    const { manager } = makeManager()
-    const rec = manager.createSession({ workspaceMode: 'default' })
-    assert.equal(rec.cwd, '/tmp/work')
-    assert.equal(rec.workspaceSource, 'runtime-default')
-  })
-})
-
-test("createSession: workspaceMode='default' 已配 defaultDir → 落到该目录（config-default）", () => {
-  withIsolatedHome((home) => {
-    const { manager } = makeManager()
-    const defaultDir = join(home, 'default-workspace')
-    // 目录必须真实存在——运行时校验（2026-09-15 审查跟进）拒绝无效落点。
-    mkdirSync(defaultDir, { recursive: true })
-    writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({ workspace: { defaultDir } }, null, 2))
-    const rec = manager.createSession({ workspaceMode: 'default' })
-    assert.equal(rec.cwd, defaultDir)
-    assert.equal(rec.workspaceSource, 'config-default')
-  })
-})
-
-test("createSession: workspaceMode='default' 配的目录不存在 → 回落且不谎报 config-default", () => {
-  withIsolatedHome((home) => {
-    const { manager } = makeManager()
-    const defaultDir = join(home, 'never-created')
-    writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({ workspace: { defaultDir } }, null, 2))
-    const rec = manager.createSession({ workspaceMode: 'default' })
-    assert.equal(rec.cwd, '/tmp/work', '无效落点必须回落 defaultCwd，不落不存在的目录')
-    assert.equal(rec.workspaceSource, 'runtime-default', '目录无效时不得谎报 config-default')
-  })
-})
-
-test('createSession: 显式 cwd 恒优先于任何模式（含 scratch）', () => {
-  withIsolatedHome(() => {
-    const { manager } = makeManager()
-    const rec = manager.createSession({ cwd: '/repo/app', workspaceMode: 'scratch' })
-    assert.equal(rec.cwd, '/repo/app')
-    assert.equal(rec.workspaceSource, 'explicit')
-  })
 })

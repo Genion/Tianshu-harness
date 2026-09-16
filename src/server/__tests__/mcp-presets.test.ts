@@ -1,6 +1,5 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -31,55 +30,6 @@ test('each preset is a well-formed transport config', () => {
 test('findMcpPreset resolves by id', () => {
   assert.equal(findMcpPreset('github')?.name, 'GitHub')
   assert.equal(findMcpPreset('nope'), undefined)
-})
-
-// ── 推荐列表的包新鲜度（issue #150：GitHub / Slack 两个预设指向已废弃的包） ──
-// 这张表是静态的：上游把包标成 deprecated 不会自动反映进来，而「推荐」是用户
-// 信任的入口——指向无人维护的包，等于让用户把 repo 权限挂在停更依赖上。
-// 三条断言分工：第一条锁住这次修的路径不被改回去，第二条挡住同族包的再次混入，
-// 第三条联网兜住将来新增的废弃项（门控，不拖慢日常跑）。
-
-test('GitHub 预设走官方 remote 端点，不再依赖已废弃的 npm 包', () => {
-  const gh = findMcpPreset('github')
-  assert.ok(gh, 'github preset must exist')
-  assert.equal(gh.transport, 'streamableHttp')
-  assert.equal(gh.url, 'https://api.githubcopilot.com/mcp/')
-  // command 的存在与否就是 manager.ts:399 的分支判据：带 command 走 stdio（token
-  // 注入 env），不带才走 remote（token 注入 Authorization header）。混装 = token
-  // 注进没人读的地方，表现为连上了但 401。
-  assert.equal(gh.command, undefined, 'remote 预设不得带 command')
-  assert.equal(gh.args, undefined, 'remote 预设不得带 args')
-  assert.equal(gh.auth?.provider, 'github', '鉴权仍走 github OAuth')
-})
-
-test('推荐列表不得指向 @modelcontextprotocol/server-* 系列包（该系列已整体废弃）', () => {
-  for (const p of MCP_PRESETS) {
-    for (const a of p.args ?? []) {
-      assert.ok(
-        !a.startsWith('@modelcontextprotocol/server-'),
-        `${p.id} 仍指向已废弃包 ${a}——见 issue #150`,
-      )
-    }
-  }
-})
-
-test('推荐列表里的 npm 包未被上游废弃（RIVET_MCP_LIVE=1 门控，需联网）', { skip: process.env.RIVET_MCP_LIVE !== '1' }, () => {
-  const deprecated: string[] = []
-  for (const p of MCP_PRESETS) {
-    if (p.transport !== 'stdio' || p.command !== 'npx') continue
-    const pkg = (p.args ?? [])[1]
-    if (!pkg) continue
-    const out = execFileSync('npm', ['view', pkg, 'deprecated'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    if (out.trim()) deprecated.push(`${p.id} → ${pkg}: ${out.trim()}`)
-  }
-  assert.deepEqual(
-    deprecated,
-    [],
-    `以下预设指向已废弃的包（改走官方端点，或先摘掉条目再找替代）：\n${deprecated.join('\n')}`,
-  )
 })
 
 /**

@@ -490,27 +490,13 @@ export class SessionPersist {
 
   writeMetadata(metadata: SessionMetadata): void {
     this.metaStore.write(metadata)
-    this.refreshListCacheEntry()
+    SessionPersist.invalidateListCache()
   }
 
   /** Upsert specific metadata fields without overwriting others */
   updateMetadata(patch: Partial<SessionMetadata>): void {
     this.metaStore.update(patch, this.sessionId)
-    this.refreshListCacheEntry()
-  }
-
-  /**
-   * 把本会话的最新 metadata 增量并入会话列表缓存（纯内存，无磁盘 I/O），
-   * 而不是整表失效。此前每次 append 都 invalidateListCache——append 监听器
-   * 每条消息都会走 updateMetadata，而 loadPrevHandoff 在每个 LLM round 都读
-   * 列表，活跃会话期间缓存命中率恒为 0，每轮全量 readdirSync + 逐会话重读。
-   * 增量 upsert 保持同样的新鲜度语义：新建/更新立即可见、updatedAt 排序即时
-   * 重排；TTL 不动，外部进程的文件变化仍按原 60s 窗口被吸收。
-   */
-  private refreshListCacheEntry(): void {
-    const meta = this.metaStore.load()
-    if (meta === undefined) return
-    SessionPersist.upsertListCacheEntry(this.cwd, SessionPersist.buildListEntry(this.sessionId, meta))
+    SessionPersist.invalidateListCache()
   }
 
   /** Initialize metadata for a new session if not already present */
@@ -690,8 +676,7 @@ export class SessionPersist {
   /**
    * Cache for listSessionsWithMetadata — avoids re-reading hundreds of session
    * meta files on every user boundary when cross-session handoff is requested.
-   * TTL: 60s. Writes upsert the session's own entry incrementally
-   * (refreshListCacheEntry) so the hot append path never cold-rows the cache.
+   * TTL: 60s. Invalidated on write (saveMetadata / saveHandoff).
    * Keyed by cwd since sessions are per-project.
    */
   private static _listCache: Map<string, { ts: number; data: Array<SessionMetadata & { id: string }> }> = new Map()
@@ -699,33 +684,6 @@ export class SessionPersist {
 
   static invalidateListCache(): void {
     SessionPersist._listCache.clear()
-  }
-
-  /** 统一的列表条目形状——全量构建与增量 upsert 共用，防两处漂移。 */
-  private static buildListEntry(id: string, meta: SessionMetadata | undefined): SessionMetadata & { id: string } {
-    return {
-      id,
-      sessionId: id,
-      createdAt: meta?.createdAt ?? 0,
-      updatedAt: meta?.updatedAt ?? 0,
-      compactEvents: meta?.compactEvents ?? [],
-      ...meta,
-    }
-  }
-
-  /**
-   * 缓存命中时把单会话条目原位并入列表。不替换数组、不刷新 ts：
-   * 命中路径的契约本来就是"同一 cwd 的多次 list 返回同一数组"，写入原位生效
-   * 即是该契约下的新鲜度语义；ts 不动则 TTL 仍按首次构建计时，外部进程的
-   * 文件变化照旧在 60s 窗口内被吸收。
-   */
-  private static upsertListCacheEntry(cwd: string, entry: SessionMetadata & { id: string }): void {
-    const cached = SessionPersist._listCache.get(cwd)
-    if (!cached) return // 缓存未建——下次 list 全量构建时自然包含本会话
-    const idx = cached.data.findIndex((e) => e.id === entry.id)
-    if (idx >= 0) cached.data[idx] = { ...cached.data[idx], ...entry }
-    else cached.data.push(entry)
-    cached.data.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
   }
 
   /** List sessions with metadata, sorted by updatedAt descending (most recent first) */
@@ -741,7 +699,15 @@ export class SessionPersist {
     for (const id of ids) {
       try {
         const p = new SessionPersist(id, cwd)
-        results.push(SessionPersist.buildListEntry(id, p.loadMetadata()))
+        const meta = p.loadMetadata()
+        results.push({
+          id,
+          sessionId: id,
+          createdAt: meta?.createdAt ?? 0,
+          updatedAt: meta?.updatedAt ?? 0,
+          compactEvents: meta?.compactEvents ?? [],
+          ...meta,
+        })
       } catch {
         // Skip corrupted sessions
       }

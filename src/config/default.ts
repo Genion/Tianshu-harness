@@ -260,9 +260,6 @@ export const DEFAULT_CONFIG: Config = {
   ui: {},
   // 项目验证命令声明 — 默认空，由项目层 .rivet-config.json 覆盖（/init 生成）
   verify: {},
-  // 工作区策略（issue #147）：空对象 = 不改旧行为——未指定目录的会话仍落到
-  // sidecar 的 defaultCwd（process.cwd()），与 workspaceMode 缺省语义一致。
-  workspace: {},
   tools: {},
   // 前缀档位：空对象 = 走 schema 默认（standard）。这里刻意不写死 profile，
   // 让「无配置 = 现状」这一不变量只有一个来源（block-policy.resolvePromptBlocks）。
@@ -287,7 +284,6 @@ export const DEFAULT_CONFIG: Config = {
       councilMultiRound: true,
       unattendedAutomation: true,
       spark: true,
-      observerShadow: true,
     },
   },
   plugins: { enabled: {} },

@@ -650,10 +650,6 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
       flush: async () => {
         await self.telemetryWriter.flush()
         await self.frameRecorder.flush()
-        await self.shadowTick.pending()
-        // 回收影子 critic 的常驻子进程：只 pending 不 dispose 会让子进程的 stdio
-        // 句柄吊住事件循环，CLI 退出被拖住（Wave 4 实测）。
-        self.shadowTick.dispose()
       },
     },
     // Phase 0 观测：CCR 触发落遥测（sensorium.jsonl 同通道）+ guardian 计数。

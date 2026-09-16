@@ -18,9 +18,8 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { tmpdir } from 'node:os'
 import { SessionStateManager } from '../agent/session-state.js'
 import { buildDynamicAppendix } from '../prompt/volatile.js'
 
@@ -324,16 +323,12 @@ describe('assembly audit — env registry completeness', () => {
   function collectRivetVars(files: string[]): Set<string> {
     const vars = new Set<string>()
     const directPattern = /process\.env\.(RIVET_[A-Z_]+)/g
-    // 括号形式（process.env['RIVET_X']）与点号形式同一语义。只认点号时，用括号
-    // 写法的变量会反向命中「registry 有条目但源码无引用」的假红（2026-09-15
-    // RIVET_SHADOW_CRITIC 实例）；生成器侧同款补齐。
-    const bracketPattern = /process\.env\[\s*['"](RIVET_[A-Z_]+)['"]\s*\]/g
     const destructuredPattern = /\benv\.(RIVET_[A-Z_]+)\b/g
     const fnPattern = /\b(?:envInt|envStr|envBool)\s*\(\s*'(RIVET_[A-Z_]+)'\)/g
 
     for (const file of files) {
       const content = readFileSync(file, 'utf8')
-      for (const pattern of [directPattern, bracketPattern, destructuredPattern, fnPattern]) {
+      for (const pattern of [directPattern, destructuredPattern, fnPattern]) {
         let m
         while ((m = pattern.exec(content)) !== null) {
           vars.add(m[1]!)
@@ -342,29 +337,6 @@ describe('assembly audit — env registry completeness', () => {
     }
     return vars
   }
-
-  test('collectRivetVars 识别括号形式的 process.env 引用（反证：旧实现下本用例会红）', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'rivet-env-scan-'))
-    try {
-      // 样本刻意用**真实已登记的变量名**：本文件自身也在扫描范围内，若样本写
-      // 自造名（RIVET_FOO），扫描器会把样本行当成真引用 → 「源码有但 registry 无」
-      // 假红；反过来生成器又会把它登记进 registry（污染条目表）。用真名两头都干净。
-      const sample = join(dir, 'sample.ts')
-      writeFileSync(sample, [
-        'const a = process.env.RIVET_DEBUG',
-        "const b = process.env['RIVET_TERSE']",
-        'if (process.env["RIVET_PLAYBOOK"] === "1") return',
-        "const c = envInt('RIVET_MAX_WORKERS')",
-      ].join('\n'))
-      const vars = collectRivetVars([sample])
-      assert.ok(vars.has('RIVET_DEBUG'), '点号形式')
-      assert.ok(vars.has('RIVET_TERSE'), '单引号括号形式——旧实现漏识别，正是 RIVET_SHADOW_CRITIC 假红的成因')
-      assert.ok(vars.has('RIVET_PLAYBOOK'), '双引号括号形式')
-      assert.ok(vars.has('RIVET_MAX_WORKERS'), '辅助函数形式不被括号补齐影响')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
 
   test('every RIVET_* in source code is in registry', () => {
     const codeVars = collectRivetVars(allFilesIncludingTests)

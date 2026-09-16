@@ -72,19 +72,6 @@ export interface TypecheckShareDeps {
 /** 锁被视为陈旧的墙钟上限。tsc 全量 43s，2 分钟是 timeout 默认值，10 分钟给足
  *  了慢机器与排队的余量——超过它基本只能是持锁者被 SIGKILL 后没跑 finally。 */
 const STALE_LOCK_MS = 10 * 60_000
-
-/**
- * 调用方（bash 工具等）应给全量类型检查留的工具级预算——**必须大于闸门的等待
- * 上限**，因为等待者可能排在 N-1 个实跑后面。
- *
- * 2026-09-14 实测：并发期单次实跑从空闲的 15.5s 劣化到 41.0s（缓存记录 8 条），
- * 4~5 路并发就足以让最后一个等待者越过 120s。工具管线的默认预算正是 120s，
- * 于是 worker 编队里必然出现 `[tool-timeout] bash timed out after 120s`——
- * 不是命令慢，是调用方给的预算小于闸门设计的等待上限。
- *
- * +3 分钟给 tsc 在等待结束后自己跑完。
- */
-export const TYPECHECK_CALLER_BUDGET_MS = STALE_LOCK_MS + 3 * 60_000
 /** 缓存条目保留数量。多会话交替修改时各自的指纹会轮换，只留一份等于互相踢掉。 */
 const MAX_CACHE_ENTRIES = 8
 const WAIT_POLL_MS = 200
@@ -371,12 +358,6 @@ export function isLockHeld(cacheDir: string): boolean {
  * 等长跑形态不在此列（它们走后台 job 通道）。
  */
 export function isTypecheckCommand(command: string): boolean {
-  // --watch 是长跑形态：进程永不退出。送进闸门等于占着跨进程锁不放（真正的
-  // typecheck 反被它挡住），前台跑还会一路等到工具超时。下面那条的注释早就
-  // 声明了这个意图，但 2026-09-14 探针实测正则并未排除它
-  // （`tsc --noEmit --watch` → true）。收口对象是「跑得完的检查」，
-  // 长跑形态走后台 job 通道。
-  if (/--watch\b/i.test(command)) return false
   // tsc --noEmit（允许 npx/pnpm/yarn/bun(bunx)/npm exec 前缀、vue-tsc 变体、
   // 路径形态调用）——前缀必须落在命令边界（^/&/;/|/( 或路径 /），字符串里
   // 提及 tsc 不算数；--watch 等长跑形态不匹配（走后台 job 通道）。

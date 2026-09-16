@@ -35,8 +35,6 @@ import type { CognitiveFrame } from './cognitive-frame.js'
 import { buildCognitiveFrameRecord, buildCognitiveFrameLiteRecord } from './cognitive-frame-replay.js'
 import { createFrameRecorder } from './frame-telemetry.js'
 import type { FrameRecorder } from './frame-telemetry.js'
-import { createShadowTick } from './shadow-critic.js'
-import type { ShadowTick } from './shadow-critic.js'
 import { emitStopReason, stopReasonAbortTag, type StopReason } from './stop-reason.js'
 import type { PlanExecutionTrace, StepResult } from './plan-execution-trace.js'
 import { buildGateConvergenceHint } from './delivery-gate-v2.js'
@@ -641,9 +639,6 @@ export class AgentLoop {
   telemetryWriter: TelemetryWriter
   /** P3-D：frame 全量记录的独立落盘通道（frames.jsonl，默认开）。 */
   frameRecorder: FrameRecorder
-  /** 闭源影子 critic 的 tick（CVM Observer Shadow）：每 turn 一次、不阻塞、
-   *  只落 shadow-observer.jsonl。无 pro 模块注册 critic 时全程 no-op，零开销。 */
-  shadowTick: ShadowTick
   baselineFingerprint: PrefixFingerprint | null = null
   sensoriumSnapshots: SensoriumEntry[] = []
   taskContract?: TaskContract
@@ -840,7 +835,6 @@ export class AgentLoop {
     this.fsWatcher = this.config.fsWatcherEnabled === false ? null : createFsWatcher({ cwd: this.cwd })
     this.telemetryWriter = createTelemetryWriter(this.cwd, this.config.sessionId)
     this.frameRecorder = createFrameRecorder(this.cwd, this.config.sessionId)
-    this.shadowTick = createShadowTick({ cwd: this.cwd, sessionId: this.config.sessionId })
     const sessionDir = join(getSessionDir(this.cwd), this.config.sessionId ?? 'anon')
     const pheromonesPath = join(sessionDir, 'pheromones.json')
     // 批级共享 store 优先（星河收编 #3）：同批 worker 共用内存信息素库，
@@ -2943,18 +2937,6 @@ export class AgentLoop {
       }
       this.telemetryWriter.write(buildCognitiveFrameLiteRecord(this.latestCognitiveFrame, this.latestStructureFlow, convergenceCheck))
     } catch { /* telemetry is diagnostics-only */ }
-    // CVM Observer Shadow（闭源影子，默认 no-op）：帧已就位，触发一次不阻塞的
-    // 影子 tick —— critic 建议只落 shadow-observer.jsonl，绝不投递、不产生
-    // prompt 字节、不 await 进主链。无 pro critic 注册时零成本返回。
-    if (this.latestCognitiveFrame) {
-      try {
-        this.shadowTick.tick({
-          frame: this.latestCognitiveFrame,
-          structureFlow: this.latestStructureFlow,
-          convergence: convergenceCheck,
-        })
-      } catch { /* shadow is diagnostics-only */ }
-    }
     // Maintain rolling score history for L3 decline-trend detection (sliding window ≤ 20)
     this.convergenceScoreHistory.push(convergenceCheck.score)
     if (this.convergenceScoreHistory.length > 20) this.convergenceScoreHistory.shift()

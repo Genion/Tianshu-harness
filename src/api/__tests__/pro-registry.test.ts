@@ -1,4 +1,4 @@
-import { after, describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   allPresetKeys,
@@ -8,7 +8,7 @@ import {
   resolvePresetBaseUrl,
   resolvePresetLabel,
 } from '../pro-registry.js'
-import type { ProPresetEntry, TurnShadowCriticFactory } from '../pro-registry.js'
+import type { ProPresetEntry } from '../pro-registry.js'
 
 const fakeSpark: ProPresetEntry = {
   key: 'deepseek-spark',
@@ -94,57 +94,5 @@ describe('pro-registry 合并视图（静态表 + 注册表）', () => {
     } finally {
       proRegistry.registerPreset({ ...fakeSpark, key: '' } as ProPresetEntry)
     }
-  })
-})
-
-describe('pro-registry · 闭源影子 critic 注册点', () => {
-  after(() => { proRegistry.registerShadowCritic(undefined) })
-
-  it('未注册时为 undefined（开源构建恒空 → 调用方 no-op）', () => {
-    proRegistry.registerShadowCritic(undefined)
-    assert.equal(proRegistry.getShadowCriticFactory(), undefined)
-  })
-
-  it('注册后 factory 可取回、按 deps 构造 critic，view 原样透传', async () => {
-    const seenDeps: Array<{ cwd: string; sessionId?: string }> = []
-    const seenTurns: number[] = []
-    proRegistry.registerShadowCritic((deps) => {
-      seenDeps.push(deps)
-      return async (view) => {
-        seenTurns.push(view.turn)
-        return { action: 'no_action', confidence: 0.8, reason: 'nothing to do' }
-      }
-    })
-    const factory = proRegistry.getShadowCriticFactory()
-    assert.ok(factory, '注册后必须可取回')
-    const critic = factory({ cwd: '/tmp/proj', sessionId: 's1' })
-    assert.deepEqual(seenDeps, [{ cwd: '/tmp/proj', sessionId: 's1' }])
-    const advice = await critic({
-      turn: 7,
-      phaseClass: 'execute',
-      inputFingerprint: 'abcdef0123456789',
-      quality: { sensorium: 'measured' },
-      sensorium: { momentum: 0.5, momentumHasData: true, stability: 0.7 },
-      pal: null,
-      evidence: { hasVerificationDebt: false, deliveryStatus: 'unverified', consecutiveFailures: 0 },
-      user: { intervened: false },
-      plan: { activePlanFile: false, planModeState: 'off' },
-      progress: { todoCompletedDelta: 0 },
-      structureFlow: null,
-      convergence: null,
-    })
-    assert.equal(advice?.action, 'no_action')
-    assert.deepEqual(seenTurns, [7])
-  })
-
-  it('重复注册覆盖，注销后回落 undefined（gate 热关路径）', () => {
-    const first: TurnShadowCriticFactory = () => async () => null
-    const second: TurnShadowCriticFactory = () => async () => null
-    proRegistry.registerShadowCritic(first)
-    assert.equal(proRegistry.getShadowCriticFactory(), first)
-    proRegistry.registerShadowCritic(second)
-    assert.equal(proRegistry.getShadowCriticFactory(), second, '后注册者生效')
-    proRegistry.registerShadowCritic(undefined)
-    assert.equal(proRegistry.getShadowCriticFactory(), undefined, '注销后必须回落 undefined')
   })
 })

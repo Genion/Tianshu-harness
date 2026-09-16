@@ -81,7 +81,6 @@ import { isToolAllowed, isToolDenied, isBashCommandAllowlisted, isBashCommandDen
 import { getMirrorConfig, setMirrorConfig, setCheckpointConfig, setApprovalMode as persistApprovalDefault } from '../config/manager.js'
 import { grantPath, listPersistedGrants } from '../tools/path-grants.js'
 import { SettingsFlow } from './settings-flow.js'
-import { runZenSlash } from './zen-command.js'
 import { loadSettingsDraft, loadSettingsEnv, saveSettings } from './settings-persist.js'
 import { formatMirrorStatus } from '../tools/mirror-env.js'
 import { detectEnv, formatEnvGuidance, recommendUvSetup, isPythonProject } from '../tools/env-check.js'
@@ -4478,14 +4477,6 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       const { handleAccountLogout } = await import('./account-login.js')
       return handleAccountLogout(app)
     },
-  })
-
-  // 禅模式（读专注开局）的显式开关——默认关，只有 /zen on 才开。
-  // on/off 写配置（新会话生效）；status 只读。逻辑与接线都在 ./zen-command.ts。
-  register("/zen", {
-    description: "禅模式：/zen on|off 写配置（新会话生效）· /zen status 查当前相位",
-    immediate: true,
-    handler: ({ app, trimmed }) => runZenSlash(trimmed, app, ctx.agent),
   })
 
   // Ecosystem workflow commands: resolve to agent prompt and submit directly.

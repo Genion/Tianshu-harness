@@ -68,10 +68,7 @@ export const MCP_PRESETS: McpPreset[] = [
     transport: 'stdio',
     command: 'npx',
     args: ['-y', '@upstash/context7-mcp'],
-    // 工具名取自 2026-09-14 的冒烟实测（context7-mcp 4.1.1）：上游已把
-    // `get-library-docs` 改名为 `query-docs`——改名前卡片一直在给用户列一个
-    // 不存在的工具，而静态表不会自己发现这件事。核对靠 `npm run smoke:mcp`。
-    expectedTools: ['resolve-library-id', 'query-docs'],
+    expectedTools: ['resolve-library-id', 'get-library-docs'],
     docsUrl: 'https://github.com/upstash/context7',
   },
   {
@@ -79,27 +76,36 @@ export const MCP_PRESETS: McpPreset[] = [
     name: 'GitHub',
     description: '读写 issues / PR / 仓库文件 —— 让 agent 直接在 GitHub 上协作',
     category: 'dev',
-    // stdio 分发给不了这个 server：官方 MCP server 已改写为 Go
-    // （github/github-mcp-server），npm 上没有官方包；生态里同名的
-    // `github-mcp-server` 是个人仓库（jungchihoon/），把用户的 repo 权限交给它，
-    // 与本条目「安全可维护」的前提冲突。故走官方 remote 托管端点：零本地依赖、
-    // 由 GitHub 维护，且天枢的 remote + OAuth 链路早已接线（manager.ts:399-408
-    // 的 cfg.command 分支——stdio 给 env，remote 给 Authorization header）。
-    // 代价要认清：remote 只消费 headers 不消费 env，所以这里**不声明 requiredEnv**
-    // ——手填 PAT 是 stdio 形态才有的路径，本条只能走 OAuth。
-    transport: 'streamableHttp',
-    url: 'https://api.githubcopilot.com/mcp/',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-github'],
     auth: { type: 'oauth' as const, provider: 'github', scopes: ['repo', 'read:org'] },
-    author: { name: 'GitHub', url: 'https://github.com/github' },
-    repoUrl: 'https://github.com/github/github-mcp-server',
-    docsUrl: 'https://github.com/github/github-mcp-server',
+    requiredEnv: [
+      {
+        key: 'GITHUB_PERSONAL_ACCESS_TOKEN',
+        label: 'GitHub Personal Access Token',
+        help: '在 GitHub Settings → Developer settings → Personal access tokens 生成（需 repo 权限）。使用 OAuth 可跳过手动填此字段。',
+      },
+    ],
+    expectedTools: ['create_issue', 'get_pull_request', 'search_repositories'],
+    docsUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/github',
   },
-  // Slack 暂不设条目（有意留白，不是遗漏）：@modelcontextprotocol/server-slack
-  // 已于 2025-04-25 废弃（issue #150），而 npm 上的候选
-  // （slack-mcp-server@1.3.0 → korotovsky/、@ubie-oss/slack-mcp-server）经核
-  // 均为个人仓库。Slack bot token 的权限面（读频道历史 + 代发消息）比 repo 更敏感，
-  // 不宜作为默认推荐交给个人维护的包。找到可信的现役实现再放回——期间用户仍可
-  // 自行添加自定义 server。
+  {
+    id: 'slack',
+    name: 'Slack',
+    description: '读取频道消息、发送通知 —— agent 可在团队 Slack 中同步进展',
+    category: 'communication',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-slack'],
+    auth: { type: 'oauth' as const, provider: 'slack', scopes: ['channels:read', 'chat:write', 'channels:history'] },
+    requiredEnv: [
+      { key: 'SLACK_BOT_TOKEN', label: 'Slack Bot Token', help: 'xoxb- 开头的 Bot User OAuth Token。使用 OAuth 可跳过。' },
+      { key: 'SLACK_TEAM_ID', label: 'Slack Team ID', help: '工作区 ID（T 开头）' },
+    ],
+    expectedTools: ['slack_post_message', 'slack_list_channels'],
+    docsUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/slack',
+  },
   {
     id: 'notion',
     name: 'Notion',
@@ -155,10 +161,7 @@ export const MCP_PRESETS: McpPreset[] = [
     transport: 'stdio',
     command: 'npx',
     args: ['-y', '@softeria/ms-365-mcp-server'],
-    // 2026-09-14 冒烟实测：原列的三项里 `download-onedrive-file-content` 已不存在
-    // （该 server 升版后 OneDrive 一族换成 search-onedrive-files / download-bytes-to-file），
-    // 换成实际返回的代表项；前两项 list-mail-messages / list-calendar-events 仍在。
-    expectedTools: ['list-mail-messages', 'list-calendar-events', 'search-onedrive-files'],
+    expectedTools: ['list-mail-messages', 'list-calendar-events', 'download-onedrive-file-content'],
     docsUrl: 'https://github.com/Softeria/ms-365-mcp-server',
   },
   {
@@ -191,12 +194,9 @@ export const MCP_PRESETS: McpPreset[] = [
     // mcp__tianshu-mcp__*，state=connected。也就是说 issue #72 的「npx 超窗」
     // 与本仓当前默认不符——启动窗口早已放宽到 60s（transport-factory.ts 的
     // DEFAULT_MCP_TIMEOUT_MS），6.5s 离上限很远。
-    // 复核入口（探针是一次性的，数字靠这两条命令现取）：
+    // 复核入口（探针是一次性的，数字靠这条 live 用例复现）：
     //   RIVET_MCP_LIVE=1 npm exec -- tsx --test src/server/__tests__/mcp-presets.test.ts
-    //   npm exec -- tsx scripts/smoke-mcp-presets.ts --only tianshu-mcp   # 真实握手 + 工具面
     // 握手毫秒数随机器与 npm 缓存浮动，看的是「能不能连上、工具面覆盖声明」。
-    // 2026-09-14 冒烟复跑：工具面已是 11 个（该包在持续升版，上面那个 9 是当时的
-    // 快照）。expectedTools 列的 9 个仍全部返回——它是代表性列举，不是全集。
     command: 'npx',
     args: ['-y', 'tianshu-mcp'],
     expectedTools: [

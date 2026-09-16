@@ -54,72 +54,6 @@ export interface ProPresetEntry {
   provider: import('../config/schema.js').ProviderConfig
 }
 
-/** ── 闭源影子 critic（agent 侧运行时可插拔点）────────────────────────
- *
- * 与上面六个注册点不同：那些都在 API 层（preset / client / wire），本组是
- * **agent 运行时**的插桩点——闭源侧注册一个「帧视图 → 建议」的纯异步函数，
- * 开源侧（src/agent/shadow-critic.ts）在 turn 尾调用它并只落台账。
- *
- * 影子语义（硬约束，由调用方保证）：
- * - 只读：critic 拿到的 view 是帧的字段投影，不含 prompt、不含会话原文。
- * - 不投递：建议不 submit 到 advisory-bus、不进 control-plane、不写 prompt。
- * - fail-safe：返回 null / 抛错 / 超时一律视为「无建议」，绝不影响 loop。
- *
- * 开源构建无 pro 模块时注册表恒空 → 调用方走 no-op，零开销、零行为差异。
- */
-export interface ShadowFrameView {
-  turn: number
-  phaseClass: string
-  /** 与 frames.jsonl 的对账键；台账记其前 12 位。 */
-  inputFingerprint: string
-  /** 逐源质量标注（measured/partial/missing/vacuous）。缺失源在下方字段为 null。 */
-  quality: Record<string, 'measured' | 'partial' | 'missing' | 'vacuous'>
-  /** 认知帧只携带三字段（与 structure-flow 投影同口径），无 pressure/coverage/complexity/freshness。 */
-  sensorium: { momentum: number; momentumHasData: boolean; stability: number } | null
-  /** PAL 攻坚层快照：anyStalled 是「真挣扎」的关键判据（区别于 structureFlow.relaxation
-   *  的「心流松弛」——Wave 0 探针实证：把 relaxation 当 thrash 会误报 41% 的帧）。 */
-  pal: { activeCases: number; anyNeedsUser: boolean; anyStalled: boolean; hasPlannedProbes: boolean } | null
-  evidence: { hasVerificationDebt: boolean; deliveryStatus: string; consecutiveFailures: number }
-  user: { intervened: boolean }
-  plan: { activePlanFile: boolean; planModeState: string }
-  progress: { todoCompletedDelta: number }
-  structureFlow: {
-    mode: string
-    relaxation: number
-    planRecommendation: string
-    tddRecommendation: string
-    reasons: string[]
-  } | null
-  convergence: { level: number; shouldAbort: boolean; abortCause: string | null } | null
-}
-
-/** 建议动作空间（8），与 cvm-observer 数据集一致。
- *  开源侧不校验取值——未知动作原样入台账，由报告侧判非法。 */
-export interface ShadowCriticAdvice {
-  action: string
-  confidence: number
-  reason: string
-}
-
-export type TurnShadowCritic = ((view: ShadowFrameView) => Promise<ShadowCriticAdvice | null>) & {
-  /** 可选收尾：持有常驻子进程的实现必须实现它（model-critic 会挂 host.dispose）。
-   *  不回收的后果不是「慢一点」——stdio 句柄会让父进程事件循环保持活跃，
-   *  CLI 退出被拖住（Wave 4 端到端探针实测挂满 120s 超时）。 */
-  dispose?: () => void
-  /** 可选预算声明：本 critic 单次建议可能耗时多久（ms）。影子 tick 的硬超时取
-   *  `critic.timeoutMs ?? tick 默认值`——真实模型加载是秒级，若 tick 仍用 3s 默认，
-   *  会出现「tick 记 timeout 而宿主其实正常」的误报。 */
-  timeoutMs?: number
-}
-
-/** 闭源 factory 的构造参数：闭源侧自行管理连接/进程生命周期。 */
-export interface ShadowCriticDeps {
-  cwd: string
-  sessionId?: string
-}
-
-export type TurnShadowCriticFactory = (deps: ShadowCriticDeps) => TurnShadowCritic
-
 export interface ProRegistry {
   registerPreset(entry: ProPresetEntry): void
   getPreset(key: string): ProPresetEntry | undefined
@@ -141,10 +75,6 @@ export interface ProRegistry {
    *  变量名与解析逻辑留在 pro 模块内，开源侧只见结构化默认值。 */
   registerWireContextDefaults(providerName: string, fn: () => WireTransformContext): void
   getWireContextDefaults(providerName: string): (() => WireTransformContext) | undefined
-  /** 闭源影子 critic（agent 运行时插桩点，见上方 ShadowFrameView 注释）。
-   *  传 undefined 即注销（测试隔离与 gate 热关用）。 */
-  registerShadowCritic(factory: TurnShadowCriticFactory | undefined): void
-  getShadowCriticFactory(): TurnShadowCriticFactory | undefined
 }
 
 function createRegistry(): ProRegistry {
@@ -154,7 +84,6 @@ function createRegistry(): ProRegistry {
   const anchorExtractors = new Map<string, ReasoningAnchorExtractor>()
   const goalExtractors = new Map<string, GoalExtractor>()
   const wireContextDefaults = new Map<string, () => WireTransformContext>()
-  let shadowCriticFactory: TurnShadowCriticFactory | undefined
   return {
     registerPreset(entry) {
       presets.set(entry.key, entry)
@@ -194,12 +123,6 @@ function createRegistry(): ProRegistry {
     },
     getWireContextDefaults(providerName) {
       return wireContextDefaults.get(providerName)
-    },
-    registerShadowCritic(factory) {
-      shadowCriticFactory = factory
-    },
-    getShadowCriticFactory() {
-      return shadowCriticFactory
     },
   }
 }

@@ -3,8 +3,8 @@
  *
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；
  * description 字段人工维护，重新生成时按 name 保留。
- * 最后生成：2026-09-15T04:40:19.417Z
- * 共 203 个变量。
+ * 最后生成：2026-09-14T07:04:54.717Z
+ * 共 181 个变量。
  *
  * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。
  * 当源码中新增 RIVET_* 引用但注册表未同步时，
@@ -69,12 +69,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_AMNESIA_SHADOW',
     defaultHint: '',
     files: ['agent/create-runtime-hooks.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_APPENDIX_DELTA',
-    defaultHint: '',
-    files: ['agent/create-agent-config.ts'],
     description: '',
   },
   {
@@ -144,12 +138,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_BUNDLED_GIT_DIR',
-    defaultHint: '',
-    files: ['platform.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_BUNDLED_PLUGINS_DIR',
     defaultHint: '',
     files: ['server/plugin-api.ts', 'server/__tests__/plugin-api.test.ts'],
@@ -206,7 +194,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_CONFIG_PATH',
     defaultHint: '',
-    files: ['tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/generate-image.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/image-gen-model-routes.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/image-gen-model.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-keys-file-migration.test.ts', 'config/__tests__/provider-keys-store.test.ts', 'config/__tests__/provider-keys.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', '__tests__/bootstrap.test.ts'],
+    files: ['tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/generate-image.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/image-gen-model-routes.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/image-gen-model.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-keys-file-migration.test.ts', 'config/__tests__/provider-keys-store.test.ts', 'config/__tests__/provider-keys.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', '__tests__/bootstrap.test.ts'],
     description: '',
   },
   {
@@ -284,7 +272,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DEBUG',
     defaultHint: '',
-    files: ['bootstrap.ts', 'main.ts', 'utils/debug.ts', 'tui/engine/image-tool.ts', 'tui/engine/__tests__/image-tool.test.ts', 'skills/skill-loader.ts', 'api/__tests__/openai-client-tool-stream-log.test.ts', 'agent/__tests__/deliver-task.test.ts', 'agent/__tests__/interrupt-marker.test.ts', 'agent/__tests__/tool-pipeline.test.ts', '__tests__/assembly-audit.test.ts'],
+    files: ['utils/debug.ts', 'tui/engine/__tests__/image-tool.test.ts', 'api/__tests__/openai-client-tool-stream-log.test.ts', 'agent/__tests__/deliver-task.test.ts', 'agent/__tests__/interrupt-marker.test.ts', 'agent/__tests__/tool-pipeline.test.ts'],
     description: '',
   },
   {
@@ -308,7 +296,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DEBUG_TELEMETRY',
     defaultHint: '',
-    files: ['tui/engine/perf-monitor.ts', 'agent/telemetry-writer.ts', 'agent/__tests__/telemetry-writer.test.ts'],
+    files: ['tui/engine/perf-monitor.ts'],
     description: '',
   },
   {
@@ -338,7 +326,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DESKTOP_DIR',
     defaultHint: 'join(rivetHome(',
-    files: ['diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts'],
+    files: ['config/paths.ts'],
     description: '',
   },
   {
@@ -357,12 +345,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_EDIT_SMART_ROUTING',
     defaultHint: '',
     files: ['agent/create-runtime-hooks.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_EFFORT_ROUTING',
-    defaultHint: '',
-    files: ['agent/__tests__/effort-routing.test.ts'],
     description: '',
   },
   {
@@ -426,12 +408,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_FRAME_TELEMETRY',
-    defaultHint: '',
-    files: ['agent/frame-telemetry.ts', 'agent/__tests__/frame-telemetry.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_GATE_BLOCK_GUARD',
     defaultHint: '',
     files: ['agent/create-runtime-hooks.ts'],
@@ -444,21 +420,9 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_GIT_BASH_PATH',
-    defaultHint: '',
-    files: ['platform.ts', 'server/__tests__/host-probe-prewarm.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_GIT_CLEAR_GUARD',
     defaultHint: '',
     files: ['agent/create-runtime-hooks.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_GIT_PATH',
-    defaultHint: '',
-    files: ['tools/__tests__/spawn-git.test.ts'],
     description: '',
   },
   {
@@ -476,7 +440,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_HOME',
     defaultHint: '',
-    files: ['tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/updater.test.ts', 'tui/__tests__/zen-command.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes-zen.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'diagnostics/log-locations.ts', 'diagnostics/__tests__/log-locations.test.ts', 'diagnostics/__tests__/logs-cli.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/deepseek-platform-client.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/worker-session.test.ts'],
+    files: ['tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/updater.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/deepseek-platform-client.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/worker-session.test.ts'],
     description: '',
   },
   {
@@ -489,24 +453,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_HYPERLINKS',
     defaultHint: '',
     files: ['tui/engine/ansi.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_IDLE_COMPACTION',
-    defaultHint: '',
-    files: ['agent/loop.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_IDLE_COMPACTION_MS',
-    defaultHint: '',
-    files: ['agent/loop.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_IDLE_COMPACTION_RATIO',
-    defaultHint: '',
-    files: ['agent/loop.ts', 'agent/__tests__/loop-idle-compaction.test.ts'],
     description: '',
   },
   {
@@ -594,12 +540,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_MAX_WORKERS',
-    defaultHint: '',
-    files: ['bootstrap.ts', 'agent/worker-process/child.ts', '__tests__/assembly-audit.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_MCP_LIVE',
     defaultHint: '',
     files: ['server/__tests__/mcp-presets.test.ts'],
@@ -660,22 +600,10 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: 'Meridian 后台全量索引的文件数上限（默认 2000）',
   },
   {
-    name: 'RIVET_MISTAKE_NOTEBOOK',
-    defaultHint: '',
-    files: ['agent/p3-integration.ts', 'agent/__tests__/p3-integration.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_MOBILE_DIR',
     defaultHint: '',
     files: ['server/serve.ts'],
     description: 'serve 的 /mobile 静态挂载目录（P2 Mobile Remote）；配置后 /mobile 前缀在 auth 门前免 Bearer 服务该目录前端资产，未配则一律 404。CLI --mobile-dir 优先于本 env。',
-  },
-  {
-    name: 'RIVET_NEIGHBOR_HINT',
-    defaultHint: '',
-    files: ['tools/read-file.ts', 'tools/__tests__/neighbor-hint.test.ts', 'agent/loop-factory.ts'],
-    description: '',
   },
   {
     name: 'RIVET_NEW_SESSION',
@@ -768,12 +696,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_PLAYBOOK',
-    defaultHint: '',
-    files: ['bootstrap.ts', '__tests__/assembly-audit.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_PLAYBOOK_INJECT',
     defaultHint: '',
     files: ['agent/context-injection.ts', 'agent/__tests__/playbook-injection-revival.test.ts'],
@@ -813,12 +735,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_PROMPT_TOOL_DESC',
     defaultHint: 'toolDescriptions',
     files: ['prompt/block-policy.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_READ_REF',
-    defaultHint: '',
-    files: ['tools/read-file.ts', 'tools/__tests__/read-file-dedup.test.ts', 'tools/__tests__/read-file-invalidation.test.ts'],
     description: '',
   },
   {
@@ -885,12 +801,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_RTK',
     defaultHint: '',
     files: ['tools/bash.ts', 'tools/__tests__/bash.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_RUNTIME_ENV',
-    defaultHint: '',
-    files: ['prompt/runtime-env.ts', 'prompt/__tests__/runtime-env.test.ts'],
     description: '',
   },
   {
@@ -961,20 +871,8 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   },
   {
     name: 'RIVET_SESSION_DIR',
-    defaultHint: 'join(homedir(',
-    files: ['server/__tests__/cache-routes.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-routes.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'pro/shadow/ledger-cli.ts', 'pro/shadow/report-cli.ts', 'diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/shadow-critic.test.ts', 'agent/__tests__/shadow-real-frame.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/switch-agent-session.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_SHADOW_CRITIC',
     defaultHint: '',
-    files: ['agent/shadow-critic.ts', 'agent/__tests__/shadow-critic.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_SHADOW_OBSERVER_CMD',
-    defaultHint: '',
-    files: ['pro/shadow/host.ts'],
+    files: ['server/__tests__/cache-routes.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-routes.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'config/paths.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/switch-agent-session.test.ts'],
     description: '',
   },
   {
@@ -996,12 +894,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_SPEC_OBSERVE',
-    defaultHint: '',
-    files: ['agent/loop-factory.ts', 'agent/loop.ts', 'agent/__tests__/llm-speculation-wiring.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_STREAM_RESULT_MAX',
     defaultHint: '',
     files: ['stream-json.ts', '__tests__/stream-json.test.ts'],
@@ -1011,18 +903,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_TDD_GATE',
     defaultHint: '\'\'',
     files: ['agent/tdd-gate.ts', 'agent/__tests__/tdd-gate.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_TELEMETRY_LITE',
-    defaultHint: '',
-    files: ['agent/frame-telemetry.ts', 'agent/shadow-critic.ts', 'agent/telemetry-writer.ts', 'agent/__tests__/frame-telemetry.test.ts', 'agent/__tests__/telemetry-writer.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_TERSE',
-    defaultHint: '',
-    files: ['prompt/__tests__/terseness-nudge.test.ts', '__tests__/assembly-audit.test.ts'],
     description: '',
   },
   {
@@ -1158,12 +1038,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
-    name: 'RIVET_WELCOME_LOGO',
-    defaultHint: '',
-    files: ['tui/format/welcome.ts', 'tui/__tests__/format-welcome.test.ts'],
-    description: '',
-  },
-  {
     name: 'RIVET_WHISPER_BIN',
     defaultHint: '',
     files: ['server/speech-routes.ts', 'server/__tests__/speech-routes.test.ts'],
@@ -1233,12 +1107,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_WRITE_PROBE',
     defaultHint: '',
     files: ['context/write-evidence-probe.ts', 'context/__tests__/write-evidence-probe.test.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_X',
-    defaultHint: '',
-    files: ['__tests__/assembly-audit.test.ts'],
     description: '',
   },
 ]

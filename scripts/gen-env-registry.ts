@@ -31,17 +31,12 @@ function collectEnvVars(): Map<string, EnvEntry> {
     const content = readFileSync(file, 'utf8')
     const relPath = relative(SRC_ROOT, file).replace(/\\/g, '/')
 
-    // 四种引用模式（与 assembly-audit.test.ts 的 collectRivetVars 对齐）：
+    // 三种引用模式（与 assembly-audit.test.ts 的 collectRivetVars 对齐）：
     // 1. process.env.RIVET_*（直接）
-    // 2. process.env['RIVET_*']（括号形式——同一语义，OCR 易漏；见下方 bracket 注释）
-    // 3. env.RIVET_*（解构后的 env 对象）
-    // 4. envInt/envStr/envBool('RIVET_*')（辅助函数）
+    // 2. env.RIVET_*（解构后的 env 对象）
+    // 3. envInt/envStr/envBool('RIVET_*')（辅助函数）
     const patterns = [
       /process\.env\.(RIVET_[A-Z_]+)/g,
-      // 括号形式与点号形式是同一引用。此前只认点号：写 `process.env['RIVET_X']`
-      // 的变量会被判定为「registry 有条目但源码无引用」（audit 假红），同时
-      // 反向漏登记。仓库里这种写法有几十处（platform/bootstrap/skill-loader…）。
-      /process\.env\[\s*['"](RIVET_[A-Z_]+)['"]\s*\]/g,
       /\benv\.(RIVET_[A-Z_]+)\b/g,
       /\b(?:envInt|envStr|envBool)\s*\(\s*'(RIVET_[A-Z_]+)'\)/g,
     ]

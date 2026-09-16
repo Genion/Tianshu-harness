@@ -1,6 +1,5 @@
 import { z } from 'zod'
 import { mcpConfigSchema, type McpConfig } from '../mcp/config.js'
-import { workspaceConfigSchema, type WorkspaceConfig } from './workspace-schema.js'
 import { providerRetrySchema } from './retry-schema.js'
 import { imageGenModelSchema } from './image-gen-schema.js'
 
@@ -913,9 +912,6 @@ export const proSchema = z.object({
     unattendedAutomation: z.boolean().default(true),
     /** Pro 扩展 provider 节点（闭源模块注册；无 pro 模块的构建不消费此开关）。 */
     spark: z.boolean().default(true),
-    /** CVM 协驾影子（闭源）：observer critic 的建议只进 shadow-observer.jsonl
-     *  台账，不投递、不改行为。无 pro 模块的构建不消费此开关。 */
-    observerShadow: z.boolean().default(true),
   }).default({}),
 }).default({})
 
@@ -996,7 +992,7 @@ export const configSchema = z.object({
   env: envSchema,
   ui: uiSchema,
   verify: verifySchema,
-  workspace: workspaceConfigSchema,  /** 工具装配档位：minimal / frontend（默认）/ full / taiyi（16 评测档）。
+  /** 工具装配档位：minimal / frontend（默认）/ full / taiyi（16 评测档）。
    *  会话启动期解析，会话内冻结（前缀缓存安全）；RIVET_TOOL_PRESET env 优先于此配置。 */
   tools: z.object({
     preset: z.enum(['minimal', 'frontend', 'full', 'taiyi']).optional(),
@@ -1061,7 +1057,6 @@ export type Config = {
   env: EnvConfig
   ui: UiConfig
   verify: VerifyConfig
-  workspace: WorkspaceConfig
   tools: {
     preset?: 'minimal' | 'frontend' | 'full' | 'taiyi' | undefined
     /** Zen Mode（禅模式）原始配置；bootstrap 经 resolveZenConfig 物化后传给 AgentLoop。 */
