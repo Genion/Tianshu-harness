@@ -10,6 +10,7 @@ const providers: Record<string, ProviderConfig> = {
     models: [
       {
         id: 'deepseek-v4-pro',
+        alias: 'v4-pro',
         contextWindow: 1_000_000,
         maxTokens: 384_000,
         pricing: { input: 1.0, output: 4.0, cacheRead: 0.1, cacheWrite: 1.0 },
@@ -68,10 +69,9 @@ describe('pricing', () => {
     assert.deepStrictEqual(pricing, { input: 1.0, output: 4.0, cacheRead: 0.1, cacheWrite: 1.0 })
   })
 
-  it('does not resolve pricing by legacy alias（alias 体系废弃后 fail-closed）', () => {
-    // 短名引用不再悄悄映射到别的模型：旧配置/旧会话里的 alias 查价返回 undefined，
-    // 而不是命中同 provider 的另一个模型错价。
-    assert.strictEqual(findModelPricing(providers, 'deepseek', 'v4-pro'), undefined)
+  it('finds pricing by model alias', () => {
+    const pricing = findModelPricing(providers, 'deepseek', 'v4-pro')
+    assert.strictEqual(pricing?.input, 1.0)
   })
 
   it('returns undefined for unknown provider or model', () => {

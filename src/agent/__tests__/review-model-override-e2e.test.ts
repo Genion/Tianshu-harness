@@ -65,7 +65,7 @@ function makeAnthropicProvider(): ProviderConfig {
     thinking: 'enabled',
     maxTokens: 8192,
     models: [
-      { id: 'claude-3-5-sonnet', contextWindow: 200_000, maxTokens: 8192, reasoningEffort: 'high' },
+      { id: 'claude-3-5-sonnet', alias: 'sonnet', contextWindow: 200_000, maxTokens: 8192, reasoningEffort: 'high' },
     ],
     unsupported: [],
   } as unknown as ProviderConfig
@@ -156,12 +156,12 @@ describe('review model override — config → card → coordinator path', () =>
   it('mixed provider+model pair: anthropic sonnet override routes correctly', () => {
     const providers = { glm: makeGLMProvider(), anthropic: makeAnthropicProvider() }
     const reviewProfiles = {
-      patcher: { provider: 'anthropic', model: 'claude-3-5-sonnet' },
+      patcher: { provider: 'anthropic', model: 'sonnet' },
     }
 
     const cards = buildReviewCards(reviewProfiles, providers)
     assert.equal(cards.size, 1)
-    assert.equal(cards.get('patcher')?.model, 'claude-3-5-sonnet')
+    assert.equal(cards.get('patcher')?.model, 'sonnet')
     // Sonnet has no 'flash' or 'pro' in its name → defaults to strong tier
     assert.equal(cards.get('patcher')?.toolUseReliability, 0.8)
   })

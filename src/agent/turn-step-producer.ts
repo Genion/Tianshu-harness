@@ -13,7 +13,7 @@ import { RepairHintTracker } from './repair-hint.js'
 import { createThetaState, getThetaPhase } from './star-event.js'
 import { mapQueriedPheromones } from './pheromone-map.js'
 import { getGitInjectedContext } from '../prompt/volatile-git.js'
-import { detectWorktreeReality, type InjectedWorktreeContext, type WorktreeReality } from './worktree-reality.js'
+import { detectWorktreeReality, type InjectedWorktreeContext } from './worktree-reality.js'
 import { advanceContractStatus, classifyPlanMethodology, classifyTaskDepth, classifyTurnMode, contractStatusFromPhaseClass, extractTaskContract, mergeFollowUpIntoContract, type TurnMode } from '../context/task-contract.js'
 import { shouldSuggestPlanMode, buildPlanModeSuggestAdvisory, buildPlanModeAutoEnterAdvisory, buildStructureFlowPlanAdvisory, planModeSuggestMode } from './plan-mode-advisor.js'
 import { skillRegistry } from '../skills/skill-loader.js'
@@ -222,22 +222,18 @@ export class TurnStepProducer {
     this.self.stigmergyStore.prune().catch(() => {})
     this.self.stigmergyStore.query().then(p => { this.self.loadedPheromones = mapQueriedPheromones(p) }).catch(() => {})
 
-    // Detect worktree reality: compare injected git context with actual worktree state.
-    // 检测含两条 git 子进程调用，与 intent 分类的网络等待互不依赖——这里只启动不等待，
-    // 两者在下方收口一起 await（2026-09-16 意图路由等待优化：总等待 max 而非 sum）。
-    // 约束：reality 的消费者是请求渲染（initializeRun 返回之后），收口在其前就位即可。
-    const worktreeRealityTask: Promise<WorktreeReality | null> = (async () => {
-      try {
-        const ctx = await getGitInjectedContext(this.self.cwd)
-        const injected: InjectedWorktreeContext | undefined = ctx
-          ? { branch: ctx.branch, head: ctx.head }
-          : undefined
-        return await detectWorktreeReality(this.self.cwd, injected)
-      } catch {
-        // Detection failure must not crash AgentLoop — clear stale warning
-        return null
-      }
-    })()
+    // Detect worktree reality: compare injected git context with actual worktree state
+    try {
+      const ctx = await getGitInjectedContext(this.self.cwd)
+      const injected: InjectedWorktreeContext | undefined = ctx
+        ? { branch: ctx.branch, head: ctx.head }
+        : undefined
+      const reality = await detectWorktreeReality(this.self.cwd, injected)
+      this.self.config.promptEngine.setWorktreeReality(reality)
+    } catch {
+      // Detection failure must not crash AgentLoop — clear stale warning
+      this.self.config.promptEngine.setWorktreeReality(null)
+    }
 
     this.self.bindSessionDomain(userInput, callbacks)
     if (
@@ -298,12 +294,7 @@ export class TurnStepProducer {
       this.self.taskContract = undefined
     }
 
-    // 收口：intent 分类（网络等待）与 worktree 检测（git 子进程）并行等待——
-    // 总等待 = max(两者) 而非 sum（2026-09-16 意图路由等待优化）。
-    await Promise.all([
-      this.self.intentRoute.buildForTurn(userInput, actionable, turnMode),
-      worktreeRealityTask.then(reality => this.self.config.promptEngine.setWorktreeReality(reality)),
-    ])
+    await this.self.intentRoute.buildForTurn(userInput, actionable, turnMode)
 
     // 协作分支 advisory（W3）：分支事实来自同一 turn route；social_idle 已在
     // route 层 fail-closed。A/D/CV3 仲裁全部在纯函数 selectCollabAdvisories

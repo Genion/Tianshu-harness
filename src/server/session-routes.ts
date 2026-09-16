@@ -1284,7 +1284,7 @@ export function buildSessionRoutes(
       const mainTotalTokens = mainInput + mainOutput
       const mainProvider = mainModel
         ? Object.entries(providers).find(([, p]) =>
-            p.models?.some(m => m.id === mainModel),
+            p.models?.some(m => m.id === mainModel || m.alias === mainModel),
           )?.[0]
         : undefined
       const mainPricing = findModelPricing(providers, mainProvider, mainModel)

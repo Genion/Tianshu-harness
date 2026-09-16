@@ -37,7 +37,6 @@ import { buildUserAnchors, stripInjectedSuffix } from './rewind-anchors.js'
 import { toolArgSummary } from '../tui/tool-label.js'
 import { listPersistedResultRounds, loadPersistedResult, type PersistedResultRound } from '../agent/coordinator.js'
 import { reapSessionModuleStores } from '../agent/session-module-store-reaper.js'
-import { deleteSessionFiles } from '../agent/session-persist.js'
 import { loadWorkerSession } from '../agent/worker-session-persist.js'
 import type { SessionRegistry } from '../agent/session-registry.js'
 import type { DecisionShift } from '../agent/loop-types.js'
@@ -1294,12 +1293,11 @@ export class RuntimeSessionManager {
     this.storesForgetter = fn
   }
 
-  private forgetStores(sessionId: string, terminal = false): void {
+  private forgetStores(sessionId: string): void {
     try { this.storesForgetter?.(sessionId) } catch { /* best-effort */ }
-    // agent 层五张会话键控 module store 的收割汇点外移在新模块——releaseAgent 与
-    // hardDelete 双链都经此处；terminal 区分挂起级（清大对象、保留门禁类记录）与
-    // 终结级（全清），理由见 reaper 模块头（2026-09-16 审查修复）。
-    reapSessionModuleStores(sessionId, terminal)
+    // agent 层五张会话键控 module store（wave 结果桥/门禁/plan/待审集/skill-gate）
+    // 的收割汇点外移在新模块——releaseAgent 与 hardDelete 双链都经此处全覆盖。
+    reapSessionModuleStores(sessionId)
   }
 
   /** Shut down and drop a session's built agent (timers, coordinator, in-flight
@@ -1974,12 +1972,8 @@ export class RuntimeSessionManager {
     const i = this.loadedOrder.indexOf(id)
     if (i !== -1) this.loadedOrder.splice(i, 1)
     try { this.persistence?.deleteSession?.(id) } catch { /* best-effort */ }
-    // 会话盘上文件（transcript/meta/memory/claims/frozen + 同名子目录）与列表
-    // 缓存条目一并清除——此前只清 events 子目录，残留会让文件系统盘点时列出
-    // 已删会话（2026-09-16 审查修复，探针实测）。
-    try { deleteSessionFiles(s.record.cwd, id) } catch { /* best-effort */ }
     // Permanently destroyed — never rebuilds, so drop stores unconditionally.
-    this.forgetStores(id, true)
+    this.forgetStores(id)
     this.notifySessionsChanged('delete')
     return true
   }
@@ -5313,14 +5307,6 @@ export class RuntimeSessionManager {
       onError: (err) => {
         if (!isActive()) return
         this.append(session, 'error', { error: redactText(err.message) })
-      },
-      onStreamInterrupted: () => {
-        if (!isActive()) return
-        // 流错误（超时/网络）终结本 run：终态如实记 'interrupted'——此前 run 照常
-        // resolve，终态被记为 'completed'，自动化/看板把超时误判为成功
-        //（2026-09-16 终态语义修复）。与 onAbort 同范式（仅 running 才改）；
-        // settle 的 .then 只覆盖 'running'，不会把它刷回 'completed'。
-        if (session.record.status === 'running') session.record.status = 'interrupted'
       },
       onAbort: (reason) => {
         if (!isActive()) return

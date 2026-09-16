@@ -920,9 +920,6 @@ export class TurnOrchestrator {
           if (collectedBlocks.length > 0 && (streamError as Error).name !== 'AbortError') { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true; turnTextPersisted = true }
           if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
           callbacks.onError(streamError)
-          // 终态语义（2026-09-16 修复）：非 AbortError 的流错误终结本 run——server
-          // 据此把会话终态记为 'interrupted'，而非等 run resolve 后被误标 'completed'。
-          if ((streamError as Error).name !== 'AbortError') callbacks.onStreamInterrupted?.(streamError)
           return
         }
 
@@ -1519,8 +1516,6 @@ export class TurnOrchestrator {
           detail: String((err as Error).message ?? err).slice(0, 200),
         })
         callbacks.onError(err as Error)
-        // 同上：非中断异常（AbortError 已在上方分支排除）同样按 'interrupted' 终结。
-        callbacks.onStreamInterrupted?.(err as Error)
       }
     } finally {
       heartbeat.stop()

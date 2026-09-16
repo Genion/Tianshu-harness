@@ -701,14 +701,6 @@ export class SessionPersist {
     SessionPersist._listCache.clear()
   }
 
-  /** 移除单会话的缓存条目（硬删链——文件删除后条目不得在重建中复活）。 */
-  static removeListCacheEntry(id: string): void {
-    for (const cached of SessionPersist._listCache.values()) {
-      const idx = cached.data.findIndex((e) => e.id === id)
-      if (idx >= 0) cached.data.splice(idx, 1)
-    }
-  }
-
   /** 统一的列表条目形状——全量构建与增量 upsert 共用，防两处漂移。 */
   private static buildListEntry(id: string, meta: SessionMetadata | undefined): SessionMetadata & { id: string } {
     return {
@@ -900,29 +892,16 @@ export function evictOldSessionsInternal(dir: string, keepSessionId: string, lim
     .slice(0, sessions.length - limit)
     .map(({ id }) => id)
 
-  for (const id of toEvict) removeSessionFilesIn(dir, id)
+  for (const id of toEvict) {
+    try { unlinkSync(join(dir, `${id}.jsonl`)) } catch { /* ignore */ }
+    try { unlinkSync(join(dir, `${id}.meta.json`)) } catch { /* ignore */ }
+    try { unlinkSync(join(dir, `${id}.memory.json`)) } catch { /* ignore */ }
+    try { unlinkSync(join(dir, `${id}.claims.jsonl`)) } catch { /* ignore */ }
+    try { unlinkSync(join(dir, `${id}.frozen.json`)) } catch { /* ignore */ }
+    // Clean up same-name session directory (backups/, and any stray files).
+    // Without this, getBackupDir() creates <id>/backups/ that evict never removes.
+    try { rmSync(join(dir, id), { recursive: true, force: true }) } catch { /* ignore */ }
+  }
 
   return toEvict
-}
-
-/** 删除某会话在 dir 下的全部落盘文件（硬删链与 LRU 驱逐共用同一清理面）。
- *  含同名子目录：getBackupDir() 会创建 <id>/backups/，不随主文件消失。 */
-function removeSessionFilesIn(dir: string, id: string): void {
-  try { unlinkSync(join(dir, `${id}.jsonl`)) } catch { /* ignore */ }
-  try { unlinkSync(join(dir, `${id}.meta.json`)) } catch { /* ignore */ }
-  try { unlinkSync(join(dir, `${id}.memory.json`)) } catch { /* ignore */ }
-  try { unlinkSync(join(dir, `${id}.claims.jsonl`)) } catch { /* ignore */ }
-  try { unlinkSync(join(dir, `${id}.frozen.json`)) } catch { /* ignore */ }
-  try { rmSync(join(dir, id), { recursive: true, force: true }) } catch { /* ignore */ }
-}
-
-/**
- * 硬删会话的落盘清理（deleteSession/hardDelete 链）：删除 transcript/meta/
- * memory/claims/frozen 与同名子目录，并移除列表缓存条目。此前硬删只清 events
- * 子目录与内存 record——落盘残留让 listSessionsWithMetadata 在全量重建后仍
- * 列出已删会话（2026-09-16 审查修复，探针实测）。
- */
-export function deleteSessionFiles(cwd: string, id: string): void {
-  removeSessionFilesIn(getSessionDir(cwd), id)
-  SessionPersist.removeListCacheEntry(id)
 }

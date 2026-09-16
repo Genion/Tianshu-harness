@@ -20,7 +20,7 @@ import { InputHandler, type KeyPress } from './input-handler.js'
 import { ResizeHandler } from './resize-handler.js'
 import { InputLine } from './input-line.js'
 import { loadImageAttachment, looksLikeImagePath, MAX_IMAGES } from './image-attach.js'
-import { readImageFromClipboard, readTextFromClipboard, looksLikeBinaryPaste, FOCUS_DEBOUNCE_MS } from './clipboard-image.js'
+import { readImageFromClipboard, readTextFromClipboard, FOCUS_DEBOUNCE_MS } from './clipboard-image.js'
 import { WriteBatcher } from './write-batcher.js'
 import { StreamRenderer } from './stream-renderer.js'
 import type { TuiPerfMonitor, TuiPerfSummary } from './perf-monitor.js'
@@ -1057,11 +1057,12 @@ export class TuiApp {
         this.renderLive()
       }
 
-      // 右键粘贴/终端菜单粘贴走 bracketed paste 文本通道（不触发 ctrl_v 按键），因此不会调
-      // handleCtrlV → readImageFromClipboard（两条路径互斥）。若剪贴板是图片，粘进来的是图片
-      // 字节乱码——先读剪贴板图片兜住它。该读图只在文本像二进制乱码时进行（判据见
-      // looksLikeBinaryPaste）：无条件读图会给每次普通粘贴加约半秒（macOS 实测中位 422ms）。
-      if (looksLikeBinaryPaste(text) && this.inputLine.images.length < MAX_IMAGES) {
+      // 右键粘贴/终端菜单粘贴走 bracketed paste 文本通道，不触发 ctrl_v 按键，
+      // 因此不会调 handleCtrlV → readImageFromClipboard。若剪贴板当前是图片，
+      // 粘贴进来的文本是图片字节的乱码——在文本处理前先尝试读剪贴板图片，
+      // 命中则附图并吞掉这段 paste，避免乱码文本污染输入框。
+      // （与 Ctrl+V 互斥：右键粘贴产生 paste 事件，Ctrl+V 产生 ctrl_v 按键，不会同时触发）
+      if (this.inputLine.images.length < MAX_IMAGES) {
         try {
           const imgResult = await readImageFromClipboard()
           if (imgResult) {
