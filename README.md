@@ -300,4 +300,9 @@ node dist/cli/entry.js
 
 ## 许可证
 
-本项目采用 [Apache License, Version 2.0](LICENSE) 开源许可。Copyright 2025-2026 Tianshu Contributors.
+本项目代码采用 [Apache License, Version 2.0](LICENSE) 开源许可。Copyright 2025-2026 Tianshu Contributors.
+
+**例外（文档许可）**：以下理论与实证文档采用 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh-hans)（署名—非商业性使用—禁止演绎），**不适用** Apache 2.0——可以署名转载原文链接，不得改编、摘编、洗稿或商用：
+
+- [CVM：从 Transformer 共享退化到认知运行时](docs/reference/cvm-cognitive-runtime.md)
+- [CVM 运行时与生态系统对 Agent 模型的实证影响报告](docs/CVM运行时对Agent模型的实证影响.md)

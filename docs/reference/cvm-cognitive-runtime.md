@@ -9,6 +9,8 @@ related: [../CVM运行时对Agent模型的实证影响.md, observability-harness
 
 # 天枢 CVM：从 Transformer 共享退化到认知运行时
 
+> **版权与许可**：本文档（含 Cognitive Anchor Collapse、认知虚拟机、TaskContract/Evidence/Convergence 三道反锚点结构等概念体系与实验设计）采用 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh-hans) 许可——署名 / 非商业性使用 / 禁止演绎。可以署名转载原文链接，但不得改编、摘编、洗稿或用于商业用途；学术引用请注明出处「天枢 Tianshu Harness · CVM 理念文档 v0.1（2026-09）」。本仓库代码部分的 Apache 2.0 许可**不适用**于本文档。
+
 > 核心理念文档 · v0.1 —— 理论框架 / 实证整理 / 后续研究基线。
 > **模型提供认知能力，CVM 提供认知执行语义。LLM provides cognition. CVM provides execution semantics.**
 
