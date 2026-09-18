@@ -11,8 +11,10 @@
  * Policy (see `chooseEol`):
  *   1. Extension that REQUIRES a fixed EOL wins on every platform (.bat/.cmd → CRLF).
  *   2. Otherwise preserve the existing file's dominant EOL (overwrite/edit).
- *   3. New file with no requirement → LF (cross-platform safe; doesn't inject
- *      CRLF into otherwise-LF repos).
+ *   3. New file with no requirement → the TARGET-PLATFORM default (`getTargetEol()`:
+ *      CRLF on Windows, LF elsewhere; overridable per target). Note this is the
+ *      implementation's actual behavior — an earlier draft of this comment said
+ *      "new file → LF", which contradicted the code and has been corrected (issue #188).
  *
  * The LF branch is byte-identical to the previous "write LF verbatim" behavior,
  * so existing LF files and tests are unaffected.
@@ -81,16 +83,25 @@ export function normalizeForWrite(filePath: string, content: string, existing?: 
 }
 
 /**
- * Detect a file's EOL by sampling its head (bounded read — avoids slurping a
- * large file just to look at its newlines). Returns null if unreadable/empty.
+ * Detect a file's EOL by sampling (bounded read — avoids slurping a large file
+ * just to look at its newlines). Head sample first; when the head holds no
+ * newline and the file is larger than the sample, also sample the tail before
+ * concluding — otherwise a file whose newlines all live past 64 KiB is
+ * misjudged as "new" and gets the platform-default EOL appended, producing a
+ * mixed-EOL file (issue #188). Returns null if unreadable/empty.
  */
 export async function detectFileEol(filePath: string, sampleBytes = 65536): Promise<Eol | null> {
   let fh: Awaited<ReturnType<typeof open>> | undefined
   try {
     fh = await open(filePath, 'r')
     const buf = Buffer.alloc(sampleBytes)
-    const { bytesRead } = await fh.read(buf, 0, sampleBytes, 0)
-    return detectEol(buf.toString('utf-8', 0, bytesRead))
+    const head = await fh.read(buf, 0, sampleBytes, 0)
+    const headEol = detectEol(buf.toString('utf-8', 0, head.bytesRead))
+    if (headEol !== null) return headEol
+    const size = (await fh.stat()).size
+    if (size <= sampleBytes) return null
+    const tail = await fh.read(buf, 0, sampleBytes, size - sampleBytes)
+    return detectEol(buf.toString('utf-8', 0, tail.bytesRead))
   } catch {
     return null
   } finally {

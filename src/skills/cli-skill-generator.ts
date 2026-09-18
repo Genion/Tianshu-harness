@@ -93,9 +93,13 @@ function runProcess(
   opts: { cwd?: string; timeoutMs: number },
 ): Promise<RunOutcome> {
   return new Promise((resolve) => {
+    // Windows 不能直接 execFile 一个 .js/.mjs/.cjs 脚本——EFTYPE（文件关联把它
+    // 当文档打开而不是执行，issue #149/#189 同族）。JS 脚本统一经当前 Node
+    // 解释执行，两个平台同语义；真实可执行文件（.exe/二进制/shebang 脚本）直跑。
+    const viaNode = /\.(?:mjs|cjs|js)$/i.test(file)
     execFile(
-      file,
-      args,
+      viaNode ? process.execPath : file,
+      viaNode ? [file, ...args] : args,
       {
         cwd: opts.cwd,
         timeout: opts.timeoutMs,

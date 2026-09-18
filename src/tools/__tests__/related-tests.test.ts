@@ -32,7 +32,9 @@ describe('RELATED_TESTS_TOOL', () => {
   })
 
   after(() => {
-    rmSync(testDir, { recursive: true, force: true })
+    // Windows 上临时文件可能仍被 spawned 进程/AV 占用——rmSync 直接 EPERM；
+    // 带重试的清理是平台无关的（POSIX 下立即成功）。
+    rmSync(testDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   })
 
   function makeParams(input: Record<string, unknown>) {
@@ -46,13 +48,13 @@ describe('RELATED_TESTS_TOOL', () => {
   it('finds __tests__/foo.test.ts for src/foo.ts', async () => {
     const result = await RELATED_TESTS_TOOL.execute(makeParams({ file: 'src/foo.ts' }))
     assert.equal(result.isError, undefined)
-    assert.ok(result.content.includes('src/__tests__/foo.test.ts'))
+    assert.ok(result.content.includes(join('src', '__tests__', 'foo.test.ts')))
   })
 
   it('finds co-located bash.test.ts for src/tools/bash.ts', async () => {
     const result = await RELATED_TESTS_TOOL.execute(makeParams({ file: 'src/tools/bash.ts' }))
     assert.equal(result.isError, undefined)
-    assert.ok(result.content.includes('src/tools/bash.test.ts'))
+    assert.ok(result.content.includes(join('src', 'tools', 'bash.test.ts')))
   })
 
   it('returns empty message when no tests exist', async () => {
@@ -64,7 +66,7 @@ describe('RELATED_TESTS_TOOL', () => {
   it('supports non-src paths', async () => {
     const result = await RELATED_TESTS_TOOL.execute(makeParams({ file: 'lib/utils.ts' }))
     assert.equal(result.isError, undefined)
-    assert.ok(result.content.includes('lib/__tests__/utils.test.ts'))
+    assert.ok(result.content.includes(join('lib', '__tests__', 'utils.test.ts')))
   })
 
   it('requiresApproval and isConcurrencySafe', () => {
@@ -77,7 +79,7 @@ describe('RELATED_TESTS_TOOL', () => {
       makeParams({ file: 'src/__tests__/foo.test.ts' }),
     )
     assert.equal(result.isError, undefined)
-    assert.ok(result.content.includes('src/foo.ts'))
+    assert.ok(result.content.includes(join('src', 'foo.ts')))
   })
 })
 
@@ -112,7 +114,7 @@ describe('RELATED_TESTS_TOOL — Python heuristics (W1)', () => {
   })
 
   after(() => {
-    rmSync(pyDir, { recursive: true, force: true })
+    rmSync(pyDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   })
 
   function makeParams(input: Record<string, unknown>) {

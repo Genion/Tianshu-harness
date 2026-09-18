@@ -108,12 +108,21 @@ describe('GLOB_TOOL', () => {
     assert.match(result.content, /outside project directory/i)
   })
 
-  it('does not follow symlink cycles', async () => {
+  it('does not follow symlink cycles', async (t) => {
     const loopDir = mkdtempSync(join(tmpdir(), 'glob-loop-'))
     try {
       mkdirSync(join(loopDir, 'a'), { recursive: true })
       writeFileSync(join(loopDir, 'a', 'file.ts'), '')
-      symlinkSync(loopDir, join(loopDir, 'a', 'loop'), 'dir')
+      try {
+        symlinkSync(loopDir, join(loopDir, 'a', 'loop'), 'dir')
+      } catch (err) {
+        // Windows 无管理员/开发者模式时 symlink 创建 EPERM——环境权限问题，
+        // 不是被测逻辑缺陷（issue #189）：跳过而非判红。
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') {
+          return t.skip('symlink creation requires admin/dev mode on Windows')
+        }
+        throw err
+      }
 
       const result = await GLOB_TOOL.execute({
         input: { pattern: '**/*.ts' },
@@ -124,7 +133,7 @@ describe('GLOB_TOOL', () => {
       assert.equal(result.isError, undefined)
       assert.ok(result.content.includes('a/file.ts'))
     } finally {
-      rmSync(loopDir, { recursive: true, force: true })
+      rmSync(loopDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     }
   })
 

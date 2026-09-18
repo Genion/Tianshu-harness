@@ -60,6 +60,22 @@ describe('line-endings pure helpers', () => {
     assert.equal(requiredEol('/x/script.sh'), null)
   })
 
+  it('detectFileEol samples the tail when the head holds no newline (issue #188)', async () => {
+    // 首 64 KiB 无换行、其后才有换行的文件——曾判为「新文件」得平台默认 EOL
+    // （append 通道把 LF 文件加成 CRLF 的混合 EOL 根因）。改尾部补采后判对。
+    mkdirSync(TEST_DIR, { recursive: true })
+    const crlfFile = join(TEST_DIR, 'late-newline-crlf.txt')
+    writeFileSync(crlfFile, `${'x'.repeat(200_000)}\r\nlast\r\n`)
+    assert.equal(await detectFileEol(crlfFile), 'crlf')
+    const lfFile = join(TEST_DIR, 'late-newline-lf.txt')
+    writeFileSync(lfFile, `${'x'.repeat(200_000)}\nlast\n`)
+    assert.equal(await detectFileEol(lfFile), 'lf')
+    // 小文件无换行仍判 null（新文件语义不变）
+    const noEolFile = join(TEST_DIR, 'no-eol.txt')
+    writeFileSync(noEolFile, 'x'.repeat(100))
+    assert.equal(await detectFileEol(noEolFile), null)
+  })
+
   it('chooseEol priority: requirement > existing > lf default', () => {
     // .bat forces crlf even if existing file is LF
     assert.equal(chooseEol('/x/a.bat', 'lf'), 'crlf')
@@ -116,10 +132,19 @@ describe('write_file EOL policy', () => {
     assert.ok(isPureCrlf(onDisk))
   })
 
-  it('keeps LF for a new source file', async () => {
+  it('new source file follows the target-platform default EOL', async () => {
     const file = join(TEST_DIR, 'mod.ts')
     await WRITE_FILE_TOOL.execute(makeParams({ file_path: file, content: 'const x = 1\nexport {}\n' }))
-    assert.equal(readFileSync(file, 'utf-8'), 'const x = 1\nexport {}\n')
+    const onDisk = readFileSync(file, 'utf-8')
+    // 目标平台默认（getTargetEol）：win32 → CRLF，其余 → LF——与
+    // platform-conventions.test.ts 的既定行为同一口径（issue #188：
+    // 两个测试曾对同一行为持相反期望，本断言按平台分流后两边一致）。
+    if (process.platform === 'win32') {
+      assert.equal(onDisk, 'const x = 1\r\nexport {}\r\n')
+      assert.ok(isPureCrlf(onDisk))
+    } else {
+      assert.equal(onDisk, 'const x = 1\nexport {}\n')
+    }
   })
 
   it('preserves a CRLF file on overwrite', async () => {
