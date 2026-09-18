@@ -78,14 +78,24 @@ describe('request_path_access tool', () => {
   it('refuses filesystem roots and system directories', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'rivet-cwd-'))
     try {
-      for (const p of ['/', '/etc', '/usr', '/Users', '/etc/passwd', '/System']) {
+      // 平台分流（issue #189 核对表标注）：POSIX 路径在 Windows 上不是文件
+      // 系统根（`/etc/passwd` 落到当前盘 \etc\passwd）——按各平台真实系统根断言，
+      // 工具的 Windows 拒绝清单（C:\Windows / C:\ / C:\Users 等）本就内建。
+      const roots = process.platform === 'win32'
+        ? ['C:\\', 'C:\\Windows', 'C:\\Program Files', 'C:\\Users']
+        : ['/', '/etc', '/usr', '/Users', '/etc/passwd', '/System']
+      for (const p of roots) {
         const res = await REQUEST_PATH_ACCESS_TOOL.execute(params({ path: p, mode: 'write' }, cwd) as never)
         assert.equal(res.isError, true, `should refuse ${p}`)
       }
-      assert.equal(isWriteGranted('/etc/hosts'), false)
-      assert.equal(isWriteGranted('/usr/local/bin/x'), false)
+      if (process.platform === 'win32') {
+        assert.equal(isWriteGranted('C:\\Windows\\System32\\x'), false)
+      } else {
+        assert.equal(isWriteGranted('/etc/hosts'), false)
+        assert.equal(isWriteGranted('/usr/local/bin/x'), false)
+      }
     } finally {
-      rmSync(cwd, { recursive: true, force: true })
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     }
   })
 

@@ -67,14 +67,23 @@ describe('import_resource', () => {
       assert.equal(subpathEscapesContainer('/a/b/repo', ''), false)
     })
 
-    it('rejects a symlink inside the container that points outside', () => {
+    it('rejects a symlink inside the container that points outside', (t) => {
       const root = mkdtempSync(join(tmpdir(), 'import-guard-'))
       try {
         mkdirSync(join(root, 'inner'), { recursive: true })
-        symlinkSync('/etc', join(root, 'inner', 'link'))
+        try {
+          symlinkSync('/etc', join(root, 'inner', 'link'))
+        } catch (err) {
+          // Windows 无管理员/开发者模式时目录符号链接创建 EPERM——环境权限问题，
+          // 非被测逻辑缺陷（issue #189 同族守卫，与 glob.test.ts 同款）。
+          if ((err as NodeJS.ErrnoException).code === 'EPERM') {
+            return t.skip('dir symlink requires admin/dev mode on Windows')
+          }
+          throw err
+        }
         assert.equal(subpathEscapesContainer(root, 'inner/link/passwd'), true)
       } finally {
-        rmSync(root, { recursive: true, force: true })
+        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
       }
     })
   })
