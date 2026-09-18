@@ -459,7 +459,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
   const rewrittenWithMirrors = rewriteGitHubUrls(rewritten, mirrorConfig)
   const sandbox = wrapSandboxCommand(rewrittenWithMirrors, params.cwd)
   const command = sandbox.command
-  const timeout = (params.input.timeout as number) ?? 120_000
+  const timeout = Number(params.input.timeout) > 0 ? Number(params.input.timeout) : 120_000 // 0/负数/NaN/未给 → 默认（#187）
   const startTime = Date.now()
 
   // Background path: explicit run_in_background=true, or auto-detected long-runner
@@ -830,11 +830,11 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       if (signal) signal.removeEventListener('abort', onAbort)
     }
 
-    const finish = async (code: number, isTimeout = false, clearForceKill = true) => {
+    const finish = async (code: number, isTimeout = false) => {
+      if (forceKillTimer) clearTimeout(forceKillTimer) // 必须在 settled 早退之前：超时/中止已 settle，close 仍会走到这里
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
-      if (clearForceKill && forceKillTimer) clearTimeout(forceKillTimer)
       cleanupAbort()
       // 结果装配兜底：buildResult 内任何异常（如 dist 混构导致的
       // ReferenceError，session 22d00a37）从 child 事件处理器逃逸时不会变成
@@ -886,8 +886,8 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     timer = setTimeout(() => {
       timedOut = true
       killProcessTree(child, 'SIGTERM')
+      void finish(0, true)
       forceKillTimer = setTimeout(() => killProcessTree(child, 'SIGKILL'), 3000)
-      void finish(0, true, false)
     }, timeout)
 
     child.on('close', (code) => {
@@ -977,7 +977,7 @@ export const BASH_TOOL: Tool = {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 shell 命令' },
-        timeout: { type: 'integer', description: '超时毫秒数（默认 120000）' },
+        timeout: { type: 'integer', minimum: 1, description: '超时毫秒数（默认 120000；非正数按默认值处理）' },
         run_in_background: { type: 'boolean', description: '设为 true 转入后台并返回 job id。自动检测已知长跑命令。' },
       },
       required: ['command'],
