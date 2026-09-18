@@ -139,6 +139,7 @@ CLI 源码 1,078 文件 / 257,623 行，测试 1,361 文件 / **16,471 用例**�
 - **API 成本控制** —— reasoning effort 自动降档路由、compact 走 flash 侧路、峰谷计价提醒。[细节](docs/user-guide.md#api-成本控制)
 - **Plan Mode 与 Goal 自治** —— 先计划后执行的审批工作流；`/goal` 目标驱动自主续跑。[细节](docs/user-guide.md#plan-mode计划模式)
 - **会话交接与倒带** —— `/handoff` 结构化交接自动注入新会话；双击 ESC 倒带到任一历史点。[细节](docs/user-guide.md#会话交接与恢复handoff--resume)
+- **LSP 深度集成** —— 自研 JSON-RPC 客户端接入语言服务器（TypeScript / Python / Go / Rust，本机装了才启用、缺失静默降级）：跳转定义与查找引用成为 agent 工具，编辑后诊断自动注入回环——改出类型错误模型立刻看见。
 - **MCP 与 Skills** —— 外部工具服务器接入 + 可复用工作流剧本，渐进披露。[细节](docs/user-guide.md#mcpmodel-context-protocol)
 - **T9 自研 TUI** —— 纯 ANSI 零依赖：GlanceBar 状态栏、流式中打断、命令面板、Cockpit 驾驶舱、内联图片。[细节](docs/user-guide.md#终端-uitui)
 - **桌面端增强** —— 集成终端、主题工作室、语音输入（本地 whisper）、手机遥控审批、多会话并发。[桌面端指南](docs/desktop-guide.md)
@@ -270,8 +271,7 @@ node dist/cli/entry.js
 
 ## ✨ 贡献者
 
-感谢所有贡献者——项目创建者与核心开发 [@huiliyi37](https://github.com/huiliyi37)；完整名单（17 位外部贡献者 / 89 个 PR）见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。
-外部 PR 经「收编」流程合入后，作者署名以 `Co-authored-by` 计入贡献者图谱（`scripts/credit-contributors.sh` 自动落账）：
+感谢所有贡献者——项目创建者与核心开发 [@banxia](https://github.com/banxia)；完整名单（17 位外部贡献者 / 89 个 PR）见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。外部 PR 经「收编」流程合入后，作者署名以 `Co-authored-by` 计入贡献者图谱（`scripts/credit-contributors.sh` 自动落账）：
 
 <p>
 <a href="https://github.com/HarriethWiKk"><img src="https://github.com/HarriethWiKk.png?size=100" width="50" height="50" alt="HarriethWiKk" title="HarriethWiKk" /></a>
