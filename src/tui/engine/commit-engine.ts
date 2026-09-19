@@ -13,7 +13,7 @@
  */
 
 import type { WriteStream } from 'node:tty'
-import { ANSI } from './ansi.js'
+import { ANSI, ANSI_SEQ_RE } from './ansi.js'
 import { createRingBuffer, type RingBuffer } from '../ring-buffer.js'
 
 /** Scrollback buffer 默认行数上限（长会话防内存无限增长）。 */
@@ -34,6 +34,29 @@ export interface CommitEngineOptions {
   flush?: boolean
   /** Scrollback buffer 行数上限（超出后丢弃最旧条目）。默认 1000。 */
   scrollbackMaxLines?: number
+}
+
+// eslint-disable-next-line no-control-regex
+const C0_CONTROL_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g
+
+// 不能继续用 ANSI_SEQ_RE 全剥（#181 移植回归）：text 通道的生产侧长期混入自产
+// 样式（StreamRenderer 的 formatMarkdown 输出、commitStatic 的 color() 高亮），
+// 全剥等于 scrollback 里 markdown/告警全部褪色。威胁模型不变——OSC 52 覆写剪贴板、
+// 非 SGR CSI 清屏/踢 alt-screen 仍剥；SGR 没有这三样能力，放行。
+// eslint-disable-next-line no-control-regex
+function enforceTextContract(text: string): string {
+  // 单遍切分：命中完整转义序列的，SGR（CSI … m）放行、OSC/其余 CSI/ESC 序列剥除；
+  // 序列之外的文本段剥 C0 控制符（含游离 ESC——不能先做 C0 全剥，否则放行序列
+  // 自己的 ESC 字节也被吃掉）。
+  let out = ''
+  let last = 0
+  for (const m of text.matchAll(ANSI_SEQ_RE)) {
+    out += text.slice(last, m.index).replace(C0_CONTROL_RE, '')
+    const seq = m[0]
+    if (seq.charCodeAt(1) === 0x5b /* [ */ && seq.endsWith('m')) out += seq
+    last = m.index + seq.length
+  }
+  return out + text.slice(last).replace(C0_CONTROL_RE, '')
 }
 
 export class CommitEngine {
@@ -68,7 +91,12 @@ export class CommitEngine {
    * 重绘区域之前（cursor save 之前），因此天然按时间顺序排列。
    */
   write(entry: CommittedEntry): void {
-    let content = entry.ansi ?? entry.text
+    // entry.text 的契约是「不含机动 ANSI 序列」——但契约此前只写在注释里，生产者
+    // 侧没有强制，模型输出/工具输出/网页正文里的 OSC/CSI 原样进 scrollback
+    // （OSC 52 覆写系统剪贴板、CSI 清屏/踢出 alt-screen）。在唯一汇聚点兜底
+    // 执行契约：剥 OSC + 非 SGR 的 CSI + 控制字符，放行 SGR 纯样式（生产侧
+    // 经此通道传 formatMarkdown/color() 的自产样式，剥了 scrollback 全褪色）。
+    let content = entry.ansi ?? enforceTextContract(entry.text)
     if (!content.endsWith('\n')) content += '\n'
     if (entry.trailingNewline) content += '\n'
     this.buffer.push(content.trimEnd())

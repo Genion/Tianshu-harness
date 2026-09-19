@@ -635,10 +635,13 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
   {
     name: '/status',
     immediate: true,
-    handler(ctx) {
+    async handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
-      const lines: string[] = ['Bandit Promotion State', '═══════════════════════']
+      // 星籍段在最前：用户问「我是谁」比问调度器状态更常见。展示口径在
+      // ./account-status.ts（与桌面端共用 src/agent/stellar-identity.ts）。
+      const { accountIdentityLines } = await import('./account-status.js')
+      const lines: string[] = [...accountIdentityLines(), '', 'Bandit Promotion State', '═══════════════════════']
       if (ctx.banditState && ctx.banditState.length > 0) {
         for (const b of ctx.banditState) {
           lines.push(`${b.source}: ${b.mode} (enabled=${b.enabled})`)
@@ -4083,7 +4086,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
         const schedule = spawnWindowsSelfUpdate(root, spec, true, ctx.sessionId)
         if (!schedule.ok) {
           app.commitStatic(`❌ 无法启动后台更新器：${schedule.error ?? 'unknown'}`)
-          app.commitStatic(`   请手动执行：npm install -g tianshu-tui@${spec}`)
+          app.commitStatic(`   请手动执行：npm install -g tianshu-harness@${spec}`)
           return true
         }
         app.commitStatic('✅ 更新已安排：天枢将退出以释放文件占用，安装完成后会自动重新打开。')

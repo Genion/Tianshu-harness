@@ -273,8 +273,10 @@ export function createTeamOrchestrateTool(
   coordinator: TeamOrchestrateCoordinator,
   options?: {
     defaultMaxParallel?: number
-    /** Pro gate: mode:'max'（多视角 planner fanout）仅 Pro 可用。缺省 true
-     *  以保持直接构造方（测试等）行为不变；bootstrap 按 pro-license 传真值。 */
+    /** Pro gate: mode:'max'（多视角 planner fanout）仅 Pro 可用。
+     *  **缺省 false**（fail-closed）：门控参数的缺省必须是「关」——缺省放行意味着
+     *  任何忘记传参的构造方（集成 / 嵌入 / 未来新增调用点）白送 Pro 功能。
+     *  bootstrap 注册时按 pro-license 传真值，运行路径显式传参，不受缺省变更影响。 */
     teamMaxEnabled?: boolean
   },
   /** H4-D4：team_orchestrate 派发 worker 完成后标记已完成 orderId */
@@ -374,7 +376,7 @@ export function createTeamOrchestrateTool(
       // (不浪费已有工作),没有计划时明确拒绝并给出 Basic 可用的替代路径。
       let effectiveMode = mode
       let proGateNote = ''
-      if (mode === 'max' && !(options?.teamMaxEnabled ?? true)) {
+      if (mode === 'max' && !(options?.teamMaxEnabled ?? false)) {
         if (tasks || markdown) {
           effectiveMode = 'standard'
           proGateNote = '\n\n[Pro] team max（多视角规划）是 Pro 功能——已降级为 standard 模式执行现有计划。升级 Pro 解锁多视角 planner fanout。'

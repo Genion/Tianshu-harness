@@ -895,11 +895,17 @@ export const verifySchema = z.object({
 }).default({})
 
 export const proSchema = z.object({
-  /** Whether Pro features are active. Can also be enabled via RIVET_PRO=1
-   *  or by placing a non-empty key in ~/.rivet/pro.license. */
+  /**
+   * Whether Pro features are active.
+   *
+   * ⚠️ 判定**不读这个字段**：桌面端只认 shell 注入的 Ed25519 凭证
+   * （`RIVET_PRO_GRANT`），CLI 读 `<rivet_home>/license.json` 并验签 —— 两边
+   * 共用同一份凭证、同一套验签（见 config/pro-license.ts）。改配置、设裸
+   * `RIVET_PRO=1`、放任意内容的许可证文件都解锁不了。字段保留仅为兼容旧配置。
+   */
   enabled: z.boolean().default(false),
-  /** Optional license key (opaque string). The runtime does not validate
-   *  signatures; online seat/validation is handled by a licensing service. */
+  /** Optional license key (opaque string)。**已不参与判定**（凭据是签名 token，
+   *  见上）；保留字段仅为兼容旧配置。 */
   licenseKey: z.string().optional(),
   /** Per-feature Pro gates. When Pro is active, features default to enabled
    *  unless explicitly set to false here. */

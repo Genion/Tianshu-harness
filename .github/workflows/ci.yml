@@ -39,6 +39,9 @@ jobs:
     # windows-latest ships Git for Windows, so this exercises the actual
     # spawn → stdio pipe → output capture → file side-effect chain that unit
     # tests on Linux cannot reach. Guards the "exit=0, empty stdout" regression.
+    # 2026-09-16 起兼作 scripts 层的 Windows 门禁：路径表达式类缺陷（`URL.pathname`
+    # 在 Windows 上带前导斜杠，join 后成 `D:\D:\...` → ENOENT）只在 Windows 暴露，
+    # 此前没有任何 job 在 Windows 上跑测试文件，只能靠人肉实机跑全量撞。
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,3 +57,9 @@ jobs:
 
       - name: Windows bash smoke test
         run: node --import tsx --test src/tools/__tests__/bash-windows-smoke.test.ts
+
+      - name: Windows path-expression tests
+        # 路径表达式缺陷的 Windows 靶子：`new URL(...).pathname` 在 Windows 上带前导斜杠
+        # （`/D:/repo/...`），经 join/readdir/mkdir 成 `D:\D:\...` → ENOENT。scripts 层
+        # （swebench-run 的 LOCAL_TMP）与 src 侧（promotion 的 existsSync 判据）各一处。
+        run: npx tsx scripts/run-node-tests.ts scripts/ src/context/__tests__/promotion.test.ts

@@ -58,12 +58,13 @@ import { SlashCommandRegistry, type SlashCommandContext } from '../slash-command
 import { getTheme, getActiveThemeName, type RivetTheme } from '../theme.js'
 import { formatUserMessage } from '../format/user-message.js'
 import { formatAskUserQuestion } from '../format/ask-user-question.js'
-import { formatToolCard, formatToolCardLive, isToolCardTruncated } from '../format/tool-card.js'
+import { formatToolCard, formatToolCardLive, isToolCardTruncated, toolCardTitle } from '../format/tool-card.js'
 import { formatCollapsedGroup, formatCollapsedGroupLive, CollapsedReadSearchBuffer, isCollapsibleTool, type CollapsedReadSearchGroup } from '../format/collapsed-read-search.js'
 import { formatCollapsedBashGroup, formatCollapsedBashGroupLive, isCollapsibleBashCommand, type CollapsedBashGroup } from '../format/collapsed-bash.js'
 import { formatPermissionDiff } from '../format/permission-diff.js'
 import { formatApprovalPrompt } from '../format/approval-renderers.js'
 import { formatThinking } from '../format/thinking.js'
+import { ThinkingReviewStore, formatThinkingReview } from './thinking-review.js'
 import { formatPromptFooter } from '../format/prompt-footer.js'
 import { formatGlanceBar, resolveStarDomainDisplay, formatGlanceLeft, formatGlanceRight, formatPermissionModeLine } from '../format/glance-bar.js'
 import { remainingSec, shouldFire } from '../plan-auto-approve.js'
@@ -1359,6 +1360,22 @@ export class TuiApp {
         if (this.state.isThinking) {
           this.state.thinkingExpanded = !this.state.thinkingExpanded
           this.renderLive()
+        } else if (!this.isAgentActive()) {
+          // 真空闲才回看最近一次 thinking：正文完整重印进 scrollback（诚实重印——
+          // scrollback 只追加不改写，重印本即持久记录；take() 防空按重复重印）。
+          // 工具执行期间 isThinking 已为 false 但 agent 仍忙（agentBusy / phase）——
+          // 此时重印会一次刷进最多 400 逻辑行，take() 之后不可撤回，故与 ctrl_r
+          // 分支同法加 isAgentActive 守卫。
+          const review = this.thinkingReview.take()
+          if (review) {
+            const reviewLines = formatThinkingReview(review, this.theme)
+            if (reviewLines.length > 0) {
+              this.commitAbove(() => {
+                this.commit.write({ text: reviewLines.join('\n'), trailingNewline: true })
+                this.state.committedCount++
+              })
+            }
+          }
         }
         return
       }
@@ -1768,6 +1785,8 @@ export class TuiApp {
       this.streamRenderController.assistantHeaderDone = false
       this.agentBusy = true
       this.todosWrittenThisRun = false
+      // 新 run 开始，上一轮的 thinking 回看作废——否则 ctrl+t 会重印出陈旧思考。
+      this.thinkingReview.clear()
     }
     // Reset turn timer for the new turn
     this.state.turnStartMs = Date.now()
@@ -5244,7 +5263,12 @@ export class TuiApp {
   private handleToolUse(id: string, name: string, input: Record<string, unknown>): void {
     this.setPhase('analyzing')
     this.markActivity()
-    this.toolGroupController.setPending(id, { name, input, startMs: Date.now(), _approvalMode: this._approvalMode })
+    // zen_unlock 是虚拟工具（无 registry 实体、结果即时合成并走 TTL 提示）：
+    // 不进 pending——它没有常规意义的「执行中→终态」生命周期，进 pending 就是
+    // 一张永远等不到终态的悬停卡（曾实挂 22 分钟：「zen_unlock (22m48s) 仍无输出」）。
+    if (name !== ZEN_UNLOCK) {
+      this.toolGroupController.setPending(id, { name, input, startMs: Date.now(), _approvalMode: this._approvalMode })
+    }
     // 注意：派发类工具（delegate_*/team_orchestrate/galaxy）不再切换 GlanceBar 星域——
     // 「天机」是子代理编排阶段的内部路由标记，不是用户可选的会话星域；把它顶到
     // 主面板星域位会让用户误以为 /domain 切了域（还牵连缓存语义），且顺带改变了
@@ -5485,6 +5509,9 @@ export class TuiApp {
     // 永远等不到终态），表现为「禅模式已解除」一直挂在推理区下面。相位状态本身已由
     // 「禅」徽章消失表达；这里只补一条限时提示（TTL 到点自动消失）。
     if (name === ZEN_UNLOCK) {
+      // 防御性清理：onToolUse 已不再为 zen_unlock 建 pending，但若有其它路径
+      // 建过（旧会话回放/未来改动），不删就是永久悬停卡。
+      this.toolGroupController.deletePending(id)
       this.zenUnlockNoticeUntil = Date.now() + TuiApp.ZEN_UNLOCK_NOTICE_MS
       this.markActivity()
       this.writeBatcher.schedule()
@@ -5767,6 +5794,14 @@ export class TuiApp {
       // Reset state
       this.agentBusy = false
       this.lastSubmittedText = null // 回合成功 settle——错误回填底料作废
+      // 收尾段 thinking 不落 scrollback（正文答案即收尾），但留存供 ctrl+t 回看。
+      if (this.state.thinkingText) {
+        this.thinkingReview.save({
+          text: this.state.thinkingText,
+          elapsedMs: Date.now() - this.state.thinkStartMs,
+          domainId: this.getActiveDomainId(),
+        })
+      }
       this.state.thinkingText = ''
       this.state.isStreaming = false
       this.state.isThinking = false
@@ -6160,6 +6195,9 @@ export class TuiApp {
    *  ticker / 批渲染帧文本未变时直接复用，消除每帧 O(n) split。主题切换经 forceRedraw 失效。 */
   private thinkingLinesMemo: { key: string; lines: string[] } | null = null
 
+  /** thinking 回看仓：commit 时留存正文，ctrl+t 空闲重印（grok-build 诚实重印对标）。 */
+  private thinkingReview = new ThinkingReviewStore()
+
   /**
    * 输入框静态 chrome 缓存：leftBar / rightBar / botBorder 只依赖
    * (separator, innerWidth, borderColor)，与输入文本、光标、GlanceBar 指标无关。
@@ -6510,14 +6548,27 @@ export class TuiApp {
     // 低于 approvalWait（等用户决定最优先），高于通用 spinner/stale 分档。
     const jobAwaiting = approvalWaiting ? null : this.jobAwaitPending()
     const stalled = this.streamRenderController.lastActivityMs > 0 && Date.now() - this.streamRenderController.lastActivityMs > 10_000
+    // analyzing 相位如实化：有工具在跑时说出在跑什么（最新 pending 的标题），
+    // 不再轮换「琢磨中」系动词冒充模型活动——长跑工具（bash/monitor/job）下
+    // 动词池会让用户以为模型在思考，实际在等工具（与 approvalWait 如实化同族）。
+    let activityLabel: string | undefined
+    if (this.state.phase === 'analyzing' && !approvalWaiting && !jobAwaiting) {
+      const pending = [...this.toolGroupController.getPendingEntries()]
+      const latest = pending[pending.length - 1]
+      if (latest) activityLabel = toolCardTitle(latest[1].name, latest[1].input)
+    }
     const spinnerLine = jobAwaiting ? null : formatSpinnerStatus({
       tick: this.streamRenderController.tick,
       phase: this.state.phase,
       elapsedMs: Date.now() - this.state.turnStartMs,
       stalled: stalled && !approvalWaiting,
+      // 终端列数交给 formatter 做标签宽度适配——否则 clampLine 从尾部截，
+      // 长 activityLabel 会把耗时挤出可视区（「在等什么」在、「等了多久」没了）。
+      columns: this.columns,
       ...(approvalWaiting ? {
         approvalWait: { toolName: approvalWaiting.name, waitMs: Date.now() - approvalWaiting.startMs },
       } : {}),
+      ...(activityLabel ? { activityLabel } : {}),
     }, this.theme)
     if (jobAwaiting) {
       const row = jobAwaiting.jobId ? this.jobsModel.get(jobAwaiting.jobId) : undefined
@@ -7257,12 +7308,17 @@ export class TuiApp {
    */
   private commitThinkingToScrollback(): void {
     if (!this.state.thinkingText) return
+    const elapsedMs = Date.now() - this.state.thinkStartMs
+    const domainId = this.getActiveDomainId()
+    // 留存正文供 ctrl+t 回看——scrollback 只有一行头部，正文是唯一可重印来源。
+    this.thinkingReview.save({ text: this.state.thinkingText, elapsedMs, domainId })
     const formatted = formatThinking({
       text: this.state.thinkingText,
-      elapsedMs: Date.now() - this.state.thinkStartMs,
+      elapsedMs,
       done: true,
       expanded: false,
-      domainId: this.getActiveDomainId(),
+      domainId,
+      reviewHint: 'ctrl+t 回看',
     }, this.theme)
     if (formatted.length === 0) return
     this.commit.write({ text: formatted.join('\n'), trailingNewline: true })

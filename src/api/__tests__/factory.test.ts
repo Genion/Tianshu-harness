@@ -622,7 +622,7 @@ describe('OpenCode Go wire headers', () => {
       'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
     )
     assert.equal(headers['x-opencode-session'], 'session-abc-123')
-    assert.match(headers['User-Agent'] ?? '', /^tianshu-tui\//, 'UA 必须是天枢自己的标识，不能是 SDK/HTTP 库名')
+    assert.match(headers['User-Agent'] ?? '', /^tianshu-harness\//, 'UA 必须是天枢自己的标识，不能是 SDK/HTTP 库名')
   })
 
   it('Anthropic 协议形态（provider name = anthropic）同样按 baseUrl host 命中 wire', async () => {
@@ -636,7 +636,7 @@ describe('OpenCode Go wire headers', () => {
       'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\ndata: {"type":"message_stop"}\n\n',
     )
     assert.equal(headers['x-opencode-session'], 'session-abc-123')
-    assert.match(headers['User-Agent'] ?? '', /^tianshu-tui\//)
+    assert.match(headers['User-Agent'] ?? '', /^tianshu-harness\//)
   })
 
   it('非 OpenCode 端点不被注入该头（避免污染其他 provider）', async () => {

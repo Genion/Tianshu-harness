@@ -156,7 +156,6 @@ function findPowerShell(): string | null {
 // architecture-guards max-lines ratchet）；此处 re-export 保持既有 import 契约不变。
 export { compareSemver, parseSemver, updateInstallSpec }
 
-/** 根据当前进程入口定位安装根目录（package.json 所在目录）。 */
 /**
  * 安装包根目录——向上找到最近的、**带 version 字段**的 package.json。
  *

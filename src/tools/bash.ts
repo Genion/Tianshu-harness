@@ -1,12 +1,12 @@
-import { spawn, execFileSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { DANGEROUS_BASH_PATTERNS } from '../agent/approval-risk.js'
+import { DANGEROUS_BASH_PATTERNS, INJECTION_PATTERNS, matchesDangerousBash } from '../agent/approval-risk.js'
 import { detectSensitiveGitAdd, AGGREGATE_ADD_MARKER } from './sensitive-file-detector.js'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import { track } from './process-tracker.js'
-import { killProcessTree } from './process-kill.js'
+import { killProcessTree, spawnShell } from './process-kill.js'
 import { getShellCommand, getShellDiagnostics, WinStreamDecoder, rewriteWindowsNullRedirect, rewritePowershellNullRedirect } from '../platform.js'
 import { wrapSandboxCommand as sandboxWrap } from './sandbox-profile.js'
 import type { SandboxBackendKind } from './sandbox-profile.js'
@@ -534,7 +534,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     const mirrorEnv = buildMirrorEnv(mirrorConfig)
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     debugLog(`[bash-spawn] kind=${shell.kind} shell=${shell.cmd} args=${JSON.stringify(shell.args)} cwd=${params.cwd ?? process.cwd()}`)
-    const child = track(spawn(shell.cmd, [...shell.args, commandToRun], {
+    const child = track(spawnShell(shell, commandToRun, {
       // Hide the transient console window on Windows (no-op elsewhere) — also
       // avoids stdio handoff quirks；置于首行以落在 architecture-guards 的 ±10 行窗口内。
       windowsHide: true,
@@ -1037,7 +1037,13 @@ export const BASH_TOOL: Tool = {
     // Check BOTH raw and rewritten commands.
     // rtkRewrite may expand aliases/macros into dangerous commands
     // that the raw form does not match.
-    if (DANGEROUS_BASH_PATTERNS.some(
+    // matchesDangerousBash 内含原始/归一化双视图（${IFS}/续行/字符级转义/
+    // 引号拼接让语义不变的命令在文本上认不出）；INJECTION 清单此前只在
+    // auto-safe 档被消费，manual 档是死代码——此处一并激活。
+    if (matchesDangerousBash(rawCommand) || matchesDangerousBash(rewrittenCommand)) {
+      return true
+    }
+    if (INJECTION_PATTERNS.some(
       pattern => pattern.test(rawCommand) || pattern.test(rewrittenCommand),
     )) {
       return true

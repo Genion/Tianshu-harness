@@ -198,8 +198,10 @@ export interface WorkerSessionConfig {
  *  AgentLoop，没有它 stall clock 在收尾期间吃不到任何信号。 */
 export type WorkerActivityKind = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'turn' | 'retry' | 'lifecycle'
 
-/** tool_use 活动行:`name(关键参数)`。toolArgSummary 覆盖常见工具;未覆盖的
- *  回退到常见参数键,再退到裸名。所有消费方(桌面 feed/TUI mirror)按纯文本展示。 */
+/** tool_use 活动行:`name(关键参数)`。toolArgSummary 已覆盖常见工具，并对未覆盖的
+ *  工具用常见参数键兜底（tool-label.ts genericArgSummary）——下面的 fallback 因此
+ *  基本不再触发，只在参数全是数组/对象（无字符串可用）时退到裸名。
+ *  所有消费方(桌面 feed/TUI mirror)按纯文本展示。 */
 export function summarizeToolUseLine(name: string, input: unknown): string {
   const rec = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
   let arg = toolArgSummary(name, rec)

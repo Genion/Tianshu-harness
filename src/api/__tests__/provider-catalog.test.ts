@@ -290,11 +290,11 @@ test('addCatalogEntry overwrites existing entry', () => {
 test('resolveProviderWire: host 规则覆盖 opencode.ai 的两种协议端点', () => {
   const openaiWire = resolveProviderWire('opencode-go', 'https://opencode.ai/zen/go/v1')
   assert.equal(openaiWire?.sessionHeader, 'x-opencode-session')
-  assert.match(openaiWire?.userAgent ?? '', /^tianshu-tui\//)
+  assert.match(openaiWire?.userAgent ?? '', /^tianshu-harness\//)
 
   const anthropicWire = resolveProviderWire('anthropic', 'https://opencode.ai/zen/go')
   assert.equal(anthropicWire?.sessionHeader, 'x-opencode-session')
-  assert.match(anthropicWire?.userAgent ?? '', /^tianshu-tui\//)
+  assert.match(anthropicWire?.userAgent ?? '', /^tianshu-harness\//)
 })
 
 test('resolveProviderWire: 子域命中，相似但与其它 host 不受影响', () => {

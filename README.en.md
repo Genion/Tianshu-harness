@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-Tui?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
+  <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
@@ -34,14 +34,14 @@
 
 > **Tianshu** is a TypeScript coding-agent runtime: one agent kernel shared by a **terminal TUI** and a **desktop GUI**. It is built to let models do continuous multi-step engineering work — with cognitive guardrails, multi-agent orchestration, and a DeepSeek V4 prefix-cache-friendly design for cost-efficient long sessions.
 
-- **One kernel, two surfaces** — a pure-ANSI terminal TUI (`rivet`) and a Tauri desktop app (macOS / Windows / Linux) share the same agent core, so capabilities stay consistent across interfaces.
+- **One kernel, two surfaces** — a pure-ANSI terminal TUI (`tianshu`) and a Tauri desktop app (macOS / Windows / Linux) share the same agent core, so capabilities stay consistent across interfaces.
 - **Cognitive Virtual Machine (CVM)** — 72 runtime hooks across 5 lifecycle phases put an observable, correctable cognitive layer between model output and real tool actions ([A/B evidence](docs/CVM运行时对Agent模型的实证影响.md)).
 - **Multi-agent orchestration** — from lightweight `/scout` reconnaissance and parallel `/team` execution to `/council` multi-model review and `/galaxy` multi-dimensional attack, complex work runs in waves with review gates.
 - **Unified project memory** — project knowledge lives in `.rivet/knowledge/memory.jsonl`; automatic injection is limited to governance/constraint/preference memories, while old failures and docs stay explicit-recall-only so they cannot hijack new questions.
 - **Prefix-cache first** — frozen prefix + incremental appendix + boundary compaction sustain a measured steady-state **95–99% prefix-cache hit rate** on DeepSeek V4.
 
 <p align="center">
-  <img src="docs/brand/assets/tianshu-tui-screenshot.png" alt="Tianshu TUI (terminal)" width="49%">
+  <img src="docs/brand/assets/tianshu-harness-screenshot.png" alt="Tianshu TUI (terminal)" width="49%">
   <img src="docs/brand/assets/tianshu-gui-screenshot.jpg" alt="Tianshu desktop GUI" width="49%">
 </p>
 <p align="center">
@@ -49,8 +49,8 @@
 </p>
 
 > [!NOTE]
-> The project was originally codenamed **Rivet**; the installed CLI binary is still
-> named `rivet` for backward compatibility.
+> The project was originally codenamed **Rivet**. The primary CLI command is now `tianshu`,
+> with `rivet` kept as a compatibility alias (same entry point); the data directory stays `~/.rivet`.
 
 ## Table of contents
 
@@ -158,35 +158,37 @@ Agent core logic (multi-turn loops, tool pipelines, context compaction) is notor
 
 ### 2. Install (pick one)
 
-**A. Desktop app (ready to use)** — download from [GitHub Releases](https://github.com/huiliyi37/Tianshu-Tui/releases/latest): macOS `.dmg` (Apple Silicon / Intel) · Windows `.exe` setup wizard · Linux `.AppImage`.
+**A. Desktop app (ready to use)** — download from [GitHub Releases](https://github.com/huiliyi37/Tianshu-harness/releases/latest): macOS `.dmg` (Apple Silicon / Intel) · Windows `.exe` setup wizard · Linux `.AppImage`.
 > **Linux support scope (new in 3.11.2)**: x64 AppImage, no install needed — `chmod +x Tianshu_*.AppImage` and run; requires glibc ≥ 2.35 (Ubuntu 22.04+ / Debian 12+ and other mainstream distros); X11 recommended (Wayland untested). Known limitation: voice input is unavailable on Linux for now (no community whisper build — falls back to browser speech); desktop auto-update works on Linux too.
 
-**B. One-line installer (recommended)** — checks Node ≥ 24 → installs `tianshu-tui` globally (npmmirror registry by default; override via `NPM_CONFIG_REGISTRY`) → launches `rivet`; idempotent, safe to re-run:
+**B. One-line installer (recommended)** — checks Node ≥ 24 → installs `tianshu-harness` globally (npmmirror registry by default; override via `NPM_CONFIG_REGISTRY`) → launches `tianshu`; idempotent, safe to re-run:
 
 ```bash
 # macOS / Linux (bash)
-bash <(curl -fsSL https://raw.githubusercontent.com/huiliyi37/Tianshu-Tui/main/scripts/install-tui.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/huiliyi37/Tianshu-harness/main/scripts/install-tui.sh)
 # install without launching:
-bash <(curl -fsSL https://raw.githubusercontent.com/huiliyi37/Tianshu-Tui/main/scripts/install-tui.sh) --no-launch
+bash <(curl -fsSL https://raw.githubusercontent.com/huiliyi37/Tianshu-harness/main/scripts/install-tui.sh) --no-launch
 
 # Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/huiliyi37/Tianshu-Tui/main/scripts/install-tui.ps1 | iex"
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/huiliyi37/Tianshu-harness/main/scripts/install-tui.ps1 | iex"
 # install without launching (after cloning the repo):
 powershell -ExecutionPolicy Bypass -File scripts\install-tui.ps1 -NoLaunch
 ```
 
-**C. npm manual install (for the CLI)** — published as `tianshu-tui`, no local build needed, with auto update checks on startup:
+**C. npm manual install (for the CLI)** — published as `tianshu-harness`, no local build needed, with auto update checks on startup:
 
 ```bash
-npm install -g tianshu-tui
-rivet
+npm install -g tianshu-harness
+tianshu
 ```
+
+> **Migrating from the old `tianshu-tui` package**: the old package owns the `rivet` bin link, so a direct install fails with `EEXIST` — uninstall first: `npm uninstall -g tianshu-tui && npm install -g tianshu-harness` (the one-line installer handles this automatically).
 
 **D. Build from source**:
 
 ```bash
-git clone https://github.com/huiliyi37/Tianshu-Tui.git
-cd Tianshu-Tui
+git clone https://github.com/huiliyi37/Tianshu-harness.git
+cd Tianshu-harness
 npm install
 npm run build      # produces dist/cli/entry.js
 npm start          # or: node dist/cli/entry.js
@@ -194,12 +196,12 @@ npm start          # or: node dist/cli/entry.js
 
 ### 3. Configure an API Key
 
-**No manual step needed for installed builds** — the first launch walks you through it: the desktop app opens a connection wizard, and the CLI auto-runs a setup wizard when no key is found. Just paste your DeepSeek key. Change it anytime: Settings → Provider on desktop, `rivet config` on the CLI.
+**No manual step needed for installed builds** — the first launch walks you through it: the desktop app opens a connection wizard, and the CLI auto-runs a setup wizard when no key is found. Just paste your DeepSeek key. Change it anytime: Settings → Provider on desktop, `tianshu config` on the CLI.
 
 **Manual configuration** is only for developers running from source (or pre-seeding a setup):
 
 ```bash
-rivet config set-key deepseek sk-xxx   # key goes to secrets.json (0600); config.json keeps only a keyRef
+tianshu config set-key deepseek sk-xxx   # key goes to secrets.json (0600); config.json keeps only a keyRef
 export DEEPSEEK_API_KEY=sk-xxx         # or: environment variable (current shell only)
 ```
 
@@ -209,7 +211,7 @@ export DEEPSEEK_API_KEY=sk-xxx         # or: environment variable (current shell
 ### 4. Launch
 
 ```bash
-rivet            # or: npm start / node dist/cli/entry.js
+tianshu            # or: npm start / node dist/cli/entry.js
 ```
 
 You should see the TUI with a `〉` prompt. Type your request and press Enter.
@@ -217,10 +219,10 @@ You should see the TUI with a `〉` prompt. Type your request and press Enter.
 ### Headless mode (script integration)
 
 ```bash
-rivet -p "explain src/agent/loop.ts"       # one-shot prompt, text output, no TUI
-rivet -p "list all TODO comments" --json   # JSON output for scripting
-rivet --stream-json -p "refactor this module"   # NDJSON event stream: text_delta/tool_use/tool_result/turn_complete… (best for CI; output is auto-redacted)
-rivet --goal "fix all type errors" --budget 50  # headless goal autonomy, max 50 turns (default 100)
+tianshu -p "explain src/agent/loop.ts"       # one-shot prompt, text output, no TUI
+tianshu -p "list all TODO comments" --json   # JSON output for scripting
+tianshu --stream-json -p "refactor this module"   # NDJSON event stream: text_delta/tool_use/tool_result/turn_complete… (best for CI; output is auto-redacted)
+tianshu --goal "fix all type errors" --budget 50  # headless goal autonomy, max 50 turns (default 100)
 ```
 
 ### Command-line flags
@@ -238,18 +240,18 @@ rivet --goal "fix all type errors" --budget 50  # headless goal autonomy, max 50
 | `--resume <id\|prefix>` `-r <id\|prefix>` | Resume a specific session (short prefix OK) |
 | `--resume` `-r` (bare) | Open the session picker after startup |
 | `--new` | Force a brand-new session |
-| `--list` · `rivet sessions` | Print the session list and exit |
+| `--list` · `tianshu sessions` | Print the session list and exit |
 | `--dangerously-skip-permissions` | One-session Unattended (skip all approvals; write sandbox stays on) |
 | `--screen-reader` | Screen-reader mode (dynamic segments not rendered; periodic redraw halted) |
 | `--skip-welcome` | Skip the welcome screen |
 | `--stream-events <path>` | Mirror this run as NDJSON `SessionEvent`s to a file |
 
-Subcommands: `rivet config` (interactive config), `rivet serve` (sidecar HTTP/SSE server), `rivet sessions` (list sessions), `rivet logs` (log locations), `rivet browser status` / `rivet browser install [--no-mirror]` (chromium health check and one-shot install for `browser_debug`; mirrors by default).
+Subcommands: `tianshu config` (interactive config), `tianshu serve` (sidecar HTTP/SSE server), `tianshu sessions` (list sessions), `tianshu logs` (log locations), `tianshu browser status` / `tianshu browser install [--no-mirror]` (chromium health check and one-shot install for `browser_debug`; mirrors by default).
 
 ### Auto-Update
 
 When installed via npm, Tianshu checks for newer versions at startup (once per 24h)
-and shows a banner. `/update` runs `npm install -g tianshu-tui@latest` and restarts.
+and shows a banner. `/update` runs `npm install -g tianshu-harness@latest` and restarts.
 Source installs use `git pull && npm install && npm run build`. Suppress the check
 with `RIVET_NO_UPDATE_CHECK=1`.
 
@@ -325,7 +327,7 @@ Tianshu ships 50 built-in tools, assembled in preset tiers (resolution priority:
 | **taiyi** | 16 | Minimal evaluation tier — high-frequency core + delivery loop, without orchestration/browser/network/vision heavyweights; auto-applies when the taiyi star domain is pinned (explicit config always wins) |
 
 ```bash
-RIVET_TOOL_PRESET=full rivet          # use full for this session
+RIVET_TOOL_PRESET=full tianshu          # use full for this session
 ```
 
 ```json
@@ -397,9 +399,9 @@ Long sessions accumulate context; past a point, starting fresh is cheaper than p
 - **State restore** — side panel, todos, and the active plan all come back
 
 ```bash
-rivet --continue                 # resume the most recent session for this cwd
-rivet --resume abc123            # resume a specific session (short prefix OK)
-rivet --resume                   # open the session picker after startup
+tianshu --continue                 # resume the most recent session for this cwd
+tianshu --resume abc123            # resume a specific session (short prefix OK)
+tianshu --resume                   # open the session picker after startup
 ```
 
 ### Council (Multi-Perspective Review)
@@ -487,10 +489,10 @@ Key switches:
 Connect external tool servers — documentation search, databases, APIs — directly into the agent's tool pipeline. MCP servers auto-discover at startup; their tools appear as `mcp__<serverId>__<toolName>`.
 
 ```bash
-rivet config mcp add-stdio <server-id> npx -y <package> [args...]   # local process
-rivet config mcp add-sse <server-id> http://localhost:3001/sse      # remote/network
-rivet config mcp add-preset context7                                # popular preset
-rivet config mcp list                                               # list + status
+tianshu config mcp add-stdio <server-id> npx -y <package> [args...]   # local process
+tianshu config mcp add-sse <server-id> http://localhost:3001/sse      # remote/network
+tianshu config mcp add-preset context7                                # popular preset
+tianshu config mcp list                                               # list + status
 ```
 
 Inside a session: `/mcp` (status) and `/debug mcp` (diagnostics). MCP tools respect the same approval mode as built-in tools.
@@ -581,7 +583,7 @@ The desktop app builds a visual interaction layer on top of the TUI's full capab
 
 Turn your phone/tablet into a second screen for Tianshu — sessions run on the computer while you watch progress and approve actions from your phone:
 
-- **Enable**: Desktop **Settings → Network → Remote Access** (shows the LAN URL, access token, and a scan-to-connect QR code); or from the CLI side, start `rivet serve` with `RIVET_SERVE_HOST=0.0.0.0` (plus `--mobile-dir` pointing at the desktop build output) to serve `/mobile` on the same port.
+- **Enable**: Desktop **Settings → Network → Remote Access** (shows the LAN URL, access token, and a scan-to-connect QR code); or from the CLI side, start `tianshu serve` with `RIVET_SERVE_HOST=0.0.0.0` (plus `--mobile-dir` pointing at the desktop build output) to serve `/mobile` on the same port.
 - **Connect**: open `http://<computer-LAN-IP>:3100/mobile` in your phone browser — scanning the QR auto-fills the token (the URL is then immediately cleaned to avoid leaking it); manual token entry also works.
 - **What you can do**: session list (sessions with pending approvals pinned on top) → read-only live timeline for a session (same folding / auto-reconnect semantics as the desktop) → approval / plan / question cards + abort button. Sending messages is intentionally out of scope.
 - **Security**: trusted LAN or tunnel only (Tailscale/SSH); in LAN mode the bearer token is the sole credential — treat it like a password; never port-forward to the public internet.
@@ -634,9 +636,9 @@ Registration steps and parameters are covered under “Image generation” in [M
 Switch providers inside a session with `/model <name>`.
 
 ```bash
-rivet config                          # interactive setup (TTY)
-rivet config setup codex --default    # Codex uses OAuth (browser login on first run)
-rivet config show
+tianshu config                          # interactive setup (TTY)
+tianshu config setup codex --default    # Codex uses OAuth (browser login on first run)
+tianshu config show
 ```
 
 Or edit `config.json` directly (only overrides needed, defaults are deep-merged). Location: `~/.rivet/config.json` for the CLI (`%LOCALAPPDATA%\.rivet` on Windows); for the desktop app check Settings → Storage (portable builds use `TianshuData\.rivet` next to the exe):
@@ -709,8 +711,8 @@ Quick reference:
 ```
 
 ```bash
-rivet --dangerously-skip-permissions      # one-session Unattended
-rivet config set-approval auto-safe       # persist the default tier
+tianshu --dangerously-skip-permissions      # one-session Unattended
+tianshu config set-approval auto-safe       # persist the default tier
 ```
 
 - Rules come in `[config]` (persisted) and `[session]` (current session) layers; `deny` always wins.
@@ -1010,9 +1012,9 @@ Write only the fields you want to override; defaults are deep-merged. Full schem
 
 ## 🤝 Community & Support
 
-- **Usage questions / discussions** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-Tui/discussions)
-- **Bug reports / feature requests** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-Tui/issues)
-- **Security vulnerabilities** → [Report privately](https://github.com/huiliyi37/Tianshu-Tui/security/advisories/new) (do not open a public issue)
+- **Usage questions / discussions** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Bug reports / feature requests** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
+- **Security vulnerabilities** → [Report privately](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new) (do not open a public issue)
 - **Contributing** → See [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Support guide** → See [SUPPORT.md](SUPPORT.md)
 
@@ -1024,7 +1026,7 @@ If Tianshu has been useful and you'd like to say thanks, you can. It stays a cof
 
 - **China mainland** — WeChat Pay (scan the QR code below)
 
-<img src="docs/brand/assets/wechat-pay.jpg" width="240" alt="WeChat Pay">
+<img src="docs/brand/assets/wechat-donate.png" width="240" alt="WeChat Pay">
 
 ## ✨ Contributors
 

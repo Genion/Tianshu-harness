@@ -63,9 +63,22 @@ rivet --goal "修复所有类型错误" --budget 50   # 无头目标自主模式
 | `--dangerously-skip-permissions` | 单次会话全自动（跳过所有审批；沙箱仍开） |
 | `--screen-reader` | 读屏模式（动态段整体不渲染、周期重绘停转） |
 | `--skip-welcome` | 跳过欢迎屏 |
-| `--stream-events <path>` | 把本次 run 镜像为 NDJSON `SessionEvent` 写入文件 |
+| `--stream-events <path>` | 把本次 run 镜像为 NDJSON `SessionEvent` 写入文件（TUI 与 `-p`/`--goal` 均支持；无头下与 `--stream-json` 同源、同一份脱敏口径。事件按行追加，可 `tail -f` / `jq` 消费；run 期间实时增长） |
 
 子命令：`rivet config`（查看配置命令帮助；交互式 Provider 配置使用 TUI `/connect`）、`rivet serve`（启动 sidecar HTTP/SSE）、`rivet sessions`（列会话）、`rivet logs`（日志落点）、`rivet browser status` / `rivet browser install [--no-mirror]`（`browser_debug` 所需 chromium 的体检与一键安装，默认走国内镜像）。
+
+### 事件流文件（`--stream-events`）
+
+把本次 run 镜像成与桌面端 `attach` 同一 schema 的 `SessionEvent`，逐行 NDJSON 落成文件；TUI 与无头（`-p` / `--goal`）都支持：
+
+```bash
+rivet -p "修复 typo" --stream-events run.jsonl            # 可与 --stream-json 同时开：一条写 stdout、一条写文件
+tail -f run.jsonl | jq -c 'select(.type == "tool_use") | .data.name'
+```
+
+每行一个记录 `{ seq, ts, type, data }`；`seq` 全程单调递增无空洞，可据此做断点续读。与 `--stream-json` 的分工是**流的宽度不同**：stdout 信封较窄（没有 `checkpoint` / `domain_drift` / `intent_note`），事件文件承载完整 `SessionEvent` 面；两者共用同一份脱敏口径，同时开不会重复写入（各自序列化一次）。
+
+两个消费须知：① 文件**懒创建**——首个事件到达时才落盘，所以"一个事件都没产生"的 run 不会留下文件，脚本轮询请容忍 ENOENT，别把"文件为空/不存在"读成"这次运行没有事件"；② 无头模式下进程退出前会 flush 并 close，尾段不会被 `process.exit` 截断。
 
 ## 核心功能
 

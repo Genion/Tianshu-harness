@@ -61,7 +61,7 @@ export interface ProviderWireConfig {
  * define (absent in dev/test builds). UA rides outside the request body, so it
  * cannot perturb the prefix cache.
  */
-export const TIANSHU_USER_AGENT = `tianshu-tui/${process.env.RIVET_VERSION ?? 'dev'}`
+export const TIANSHU_USER_AGENT = `tianshu-harness/${process.env.RIVET_VERSION ?? 'dev'}`
 
 // ─── Catalog entry ───────────────────────────────────────────
 

@@ -100,6 +100,7 @@ import { StigmergyStore } from '../context/stigmergy.js'
 import { batchPrewarm } from './prewarm-file.js'
 import type { RuntimeCoordinatorSnapshot } from './runtime-self-model.js'
 import { deriveCandidateModels, type CandidateModel } from './candidate-models.js'
+import { isSafeFileName } from '../utils/safe-path.js'
 
 /** 等槽 waiter：角色决定它能吃哪个池的槽位。 */
 interface WorkerSlotWaiter {
@@ -668,6 +669,9 @@ function coordinatorSubagentsDir(homeDir?: string): string {
 }
 
 export function loadPersistedResult(orderId: string, homeDir?: string): WorkerResult | null {
+  // orderId 拼进文件名——与下方 isSafeRoundNonce 同族守卫（nonce 有校验而
+  // orderId 曾裸奔；workerId 亦可经 HTTP 路由到达此处）。
+  if (!isSafeFileName(orderId)) return null
   try {
     const path = join(coordinatorSubagentsDir(homeDir), `${orderId}.json`)
     if (!existsSync(path)) return null
@@ -1351,7 +1355,9 @@ export class DelegationCoordinator {
     return cards.find(c => c.model === best.model)
   }
 
-  /** Resolve which routing provider serves a given model id (or alias). */
+  /** Resolve which routing provider serves a given model id.
+   *  routing 表按 id 配（`model.alias` 字段 2026-09 起已废弃）——此处没有别名可解析，
+   *  「模型引用经别名表归一」的入口在 provider-keys / bootstrap 那条链上。 */
   private providerIdForModel(modelId: string): string | undefined {
     const providers = this.config.routing?.providers
     if (!providers) return undefined

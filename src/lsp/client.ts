@@ -3,6 +3,7 @@ import { isAbsolute, relative, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import type { LspDiagnostic } from './manager.js'
+import { hasServerForFile } from './server-registry.js'
 import { runTypecheckShared } from './typecheck-cache.js'
 
 export interface LspCheckResult {
@@ -262,7 +263,11 @@ async function runTypeCheckInProcess(cwd: string, filePath: string): Promise<Lsp
 export function shouldRunDiagnostics(toolName: string, filePath?: string): boolean {
   if (toolName !== 'write_file' && toolName !== 'edit_file') return false
   if (!filePath) return false
-  return /\.(ts|tsx|js|jsx)$/.test(filePath)
+  // 触发面 = registry 已注册的语言。原先硬编码 /\.(ts|tsx|js|jsx)$/，多语言
+  // registry 装了 pyright/gopls/jdtls 也收不到编辑后诊断——非 JS/TS 语言的
+  // LSP 只对显式工具调用生效。未注册扩展名（.md/.json/.txt…）仍不触发，
+  // 免得为无 server 的语言白跑一次探测。
+  return hasServerForFile(filePath)
 }
 
 /** ±context lines added around each changed range when deciding "in-region". */

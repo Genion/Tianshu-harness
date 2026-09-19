@@ -73,6 +73,7 @@ import { join, resolve, dirname } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { existsSync, copyFileSync, statSync, mkdirSync } from 'node:fs'
 import { resolveSessionWorkspaceForSession, type SessionWorkspaceMode } from './workspace.js'
+import { stripTerminalEscapes } from '../utils/safe-path.js'
 import { createWorktree, removeWorktree, listWorktrees, hasUnlandedWork, commitAll, revParseHead, squashMergeBranch, pushBranch, type WorktreeEntry } from '../agent/worktree.js'
 import { createPr } from './gh-cli.js'
 import { getGitGraph, getWorkingTreeFiles, getFileDiff, getFileAtBase, listGitBranches } from '../tools/git.js'
@@ -144,8 +145,9 @@ export type PlanUpdateOutcome =
       reason: string
     }
 
-/** 工具调用参数摘要(worker 转录):优先 toolArgSummary 的领域摘要,
- *  未覆盖的工具回退原始 JSON 截断。展示用途,解析失败不抛。 */
+/** 工具调用参数摘要(worker 转录):优先 toolArgSummary 的领域摘要——它已含未覆盖
+ *  工具的通用参数键兜底（tool-label.ts），仅当参数里没有可用字符串/数字时才回退
+ *  原始 JSON 截断。展示用途,解析失败不抛。 */
 function summarizeToolCallArgs(call: OaiToolCall | undefined): string | undefined {
   if (!call) return undefined
   const raw = call.function.arguments ?? ''
@@ -693,6 +695,8 @@ export interface RuntimeSessionManagerOptions {
    * of how much history accumulates. Default 16.
    */
   maxLoadedSessions?: number
+  /** 外部新增会话的发现间隔（ms）：同 home 多进程共用时，定期装填本进程不认识的会话并推 sessions_changed。默认 5000；0 = 关闭。 */
+  externalScanMs?: number
   /** Auto-resolve a pending intervention after this many ms. 0 = never. Default 0. */
   approvalTimeoutMs?: number
   /** C2 刹车 — watchdog 停滞续跑前的可取消倒计时窗口（ms）。Default 5000. */
@@ -1214,6 +1218,9 @@ export class RuntimeSessionManager {
   /** 阶段 4 — 会话列表失效提示回调（见 RuntimeSessionManagerOptions.onSessionsChanged）。 */
   private readonly onSessionsChanged?: (reason: string) => void
   private idleSweepTimer?: ReturnType<typeof setInterval>
+  /** 外部新增会话的扫描定时器（见 externalScanMs）。 */
+  private externalScanTimer?: ReturnType<typeof setInterval>
+  private readonly externalScanMs: number
   /** Per-session coordinator refs for worker steer/kill (set by main.ts after agent build). */
   private readonly coordinatorBySession = new Map<string, () => import('../agent/coordinator.js').DelegationCoordinator | undefined>()
 
@@ -1257,12 +1264,21 @@ export class RuntimeSessionManager {
     this.loadPlans = opts.listPlans ?? storeListPlans
     this.missionStore = opts.missionStore
     this.onSessionsChanged = opts.onSessionsChanged
+    const envExternalScan = Number(process.env.RIVET_EXTERNAL_SCAN_MS)
+    this.externalScanMs = opts.externalScanMs
+      ?? (Number.isFinite(envExternalScan) && envExternalScan >= 0 ? Math.floor(envExternalScan) : 5_000)
     if (this.idleAgentTtlMs > 0) {
       // Sweep once a minute; unref so the timer never keeps the process alive.
       this.idleSweepTimer = setInterval(() => this.sweepIdleAgents(), 60_000)
       this.idleSweepTimer.unref?.()
     }
     if (this.persistence) this.rehydrate()
+    if (this.persistence && this.externalScanMs > 0) {
+      // 同上：unref——发现定时器不该把进程钉住（sidecar 退出时它必须能退）。
+      // 首扫刻意不在此刻做：rehydrate 刚装填完，紧接着扫一次只会空转。
+      this.externalScanTimer = setInterval(() => this.adoptExternalSessions(), this.externalScanMs)
+      this.externalScanTimer.unref?.()
+    }
   }
 
   /**
@@ -1359,6 +1375,49 @@ export class RuntimeSessionManager {
    * 'aborted' (interrupted by restart) and is view-only until a fresh run is
    * started in the same cwd. events.jsonl is the source of truth for seq.
    */
+  /**
+   * 装填**外部进程**新增的会话（同 home 多进程共用场景，见 `externalScanMs`）。
+   * `rehydrate()` 只在构造时读盘一次，外部进程之后建的会话本进程无从知晓
+   * （`GET /sessions` 不返回、按 id 取 404，UI 只能重启才看得到）；这里定期补装并
+   * 通知客户端重取。只增不覆盖：归档/删除归持有它的那个进程；外部新会话不可能
+   * 处于 running，故不需要 rehydrate 里那套崩溃收尾（孤儿审批 / resume_offer）。
+   */
+  private adoptExternalSessions(): void {
+    const p = this.persistence
+    if (!p || typeof p.loadRecords !== 'function') return
+    let records: SessionRecord[]
+    try { records = p.loadRecords() } catch { return }
+    let adopted = 0
+    for (const rawRecord of records) {
+      const id = rawRecord.id
+      if (!id || this.sessions.has(id)) continue
+      const rec = sanitizeSessionDomain(rawRecord)
+      this.sessions.set(id, {
+        record: { ...rec, lastSeq: rec.lastSeq, pendingApprovals: 0 },
+        agent: null,
+        events: [],
+        eventsLoaded: false,
+        seq: rec.lastSeq,
+        running: false,
+        lifecycleGeneration: 0,
+        pending: new Map(),
+        pendingDelegations: new Map(),
+        listeners: new Set(),
+        knownArtifacts: new Set(),
+        steer: new SteerBuffer(),
+        queueLane: [],
+        domainState: resolveDomainState(rec.domain ?? 'auto')?.state,
+        disabledSkills: new Set(),
+        skillLoadErrors: [],
+        reasoningEffort: rec.reasoningEffort as import('../agent/auto-reasoning.js').ReasoningEffort | 'auto' | undefined,
+        planAutoApproveUi: rec.planAutoApproveUi === true,
+        approvalMode: rec.approvalMode,
+      })
+      adopted++
+    }
+    if (adopted > 0) this.onSessionsChanged?.('external')
+  }
+
   private rehydrate(): void {
     const p = this.persistence!
     // Lazy boot: read only the lightweight index.json records — NOT the event
@@ -2218,7 +2277,9 @@ export class RuntimeSessionManager {
         updatedAt: ts,
         cwd,
         workspaceSource: workspace.source,
-        title: input.title,
+        // 标题来自 HTTP body、不经消息消毒链——落盘前剥终端转义（标题会经
+        // /sessions、Chronicle、退出摘要三条路径反复回放终端，OSC 52 驻留）。
+        title: input.title === undefined ? undefined : stripTerminalEscapes(input.title),
         lastSeq: 0,
         pendingApprovals: 0,
         approvalMode: input.approvalMode,
@@ -4314,6 +4375,12 @@ export class RuntimeSessionManager {
       clearInterval(this.idleSweepTimer)
       this.idleSweepTimer = undefined
     }
+    // 外部会话扫描器同样要清：虽 unref 不钉进程，但只要进程不退（测试、桌面端
+    // 重建 manager），被丢弃的 manager 会一直每 externalScanMs 扫一次盘。
+    if (this.externalScanTimer) {
+      clearInterval(this.externalScanTimer)
+      this.externalScanTimer = undefined
+    }
     const pending: Promise<void>[] = []
     for (const s of this.sessions.values()) {
       let shutdownResult: void | boolean | Promise<void | boolean> | undefined
@@ -4418,7 +4485,7 @@ export class RuntimeSessionManager {
   setTitle(id: string, title: string): boolean {
     const s = this.sessions.get(id)
     if (!s) return false
-    s.record.title = title.trim()
+    s.record.title = stripTerminalEscapes(title).trim()
     this.touch(s)
     this.persistRecord(s)
     return true

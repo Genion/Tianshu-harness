@@ -91,6 +91,8 @@ import { createModeAwareRunner, workerIsolationEnabled, workerIsolationMode } fr
 import type { ResolvedReviewOverride } from './agent/review-model-override.js'
 import { createAuthProvider } from './auth/registry.js'
 import { resolveCapabilities } from './api/provider.js'
+import { canonicalizeModelId } from './api/model-aliases.js'
+import { contractModels } from './config/contract-models.js'
 import { DelegationCoordinator } from './agent/coordinator.js'
 import { ProviderHealthTracker } from './agent/provider-health.js'
 import { effectiveBanditMode, resolveBanditPromotion } from './agent/bandit-promotion.js'
@@ -613,7 +615,8 @@ export function createInteractiveToolRegistry(
   if (presetIncludes(toolPreset, 'team_orchestrate')) {
     teamOrchestrateTool = createTeamOrchestrateTool(planExecutorDeps, {
       defaultMaxParallel: config.agent.maxTeamParallel,
-      // Pro gate（双层模式）：桌面端由 Rust 验签后注入 RIVET_PRO=1；CLI 保持软 gate。
+      // Pro gate（双层模式）：桌面端由 shell 验签 + 完整性校验后注入签名凭证
+      // （RIVET_PRO_GRANT，sidecar 侧再验一次签名）；CLI 保持软 gate。
       teamMaxEnabled: isProFeatureEnabled(config, 'teamMax'),
     })
     reg.register(teamOrchestrateTool)
@@ -875,19 +878,37 @@ export function createAgentRuntime(deps: {
   // 而兜底的 models[0] 常常是同名的纯文本档——症状是「配了视觉模型却完全看不到
   // 图片」，界面上却毫无异常，是最难查的一类故障。别名失配尤其容易踩：preset 给
   // 模型加的 alias 进不了存量 config 快照（数组整组替换 + alias 不在回填白名单）。
+  // 归一后再比：上面那段说的存量字符串（preset 短名 / 旧名）本该按 canonical id 比。
+  // 不归一的话失配 → models[0] 位置性回退 → 请求打到另一个档（上游不认的 id → 400，
+  // 套餐绑定的卡 → 429）。精确命中优先、归一只是补位（别名 key 可能是池内某个模型的
+  // 真实 id）；表里没有的名字原样保留（L4：不猜），行为与改动前一致。
+  //
+  // 池子取契约层（provider-keys.ts 头注释：消费方一律走 contractModels）——keys 池
+  // 才是模型的事实源，顶层 provider.models 是迁移时的快照。读顶层会漏掉只在 key 池里
+  // 的模型（失配 → 回退到快照的 models[0]，正是上面那类故障），也会让用户已从 key 池
+  // 删掉的模型继续可用。
+  const contractPool = contractModels(provider)
+  const resolvedModelId = modelId ? canonicalizeModelId(modelId) : undefined
   const matchedModel = modelId
-    ? provider.models.find(m => m.id === modelId)
+    ? (contractPool.find(m => m.id === modelId)
+      ?? (resolvedModelId !== undefined && resolvedModelId !== modelId
+        ? contractPool.find(m => m.id === resolvedModelId)
+        : undefined))
     : undefined
   if (modelId && !matchedModel && !warnedModelFallback.has(modelId)) {
     warnedModelFallback.add(modelId)
     // 与 warnVisionBridge 同惯例：console.warn 在终端可见（stderr，不进渲染回路）。
+    // 归一过就在告警里点名，否则「配置里写短名」会被读成「配错了模型」。
+    const normalizedHint = resolvedModelId && resolvedModelId !== modelId
+      ? `（已按别名表归一为 "${resolvedModelId}"）`
+      : ''
     console.warn(
-      `[model] 配置的模型 "${modelId}" 不在 provider "${provider.name}" 下，已回退到 `
-      + `"${provider.models[0]!.id}"（该档不支持视觉时图片将无法被识别）。`
-      + `可选：${provider.models.map(m => m.id).join(', ')}`,
+      `[model] 配置的模型 "${modelId}"${normalizedHint} 不在 provider "${provider.name}" 下，已回退到 `
+      + `"${contractPool[0]!.id}"（该档不支持视觉时图片将无法被识别）。`
+      + `可选：${contractPool.map(m => m.id).join(', ')}`,
     )
   }
-  const currentModel = matchedModel ?? provider.models[0]!
+  const currentModel = matchedModel ?? contractPool[0]!
 
   // wire 上下文会话固化（2026-08-07 spark T1）：meta 已有值 → 恒用之（resume/
   // 跨端字节稳定）；无值且 provider 注册了默认（spark 的 env 解析 N）→ 取默认
@@ -1231,8 +1252,9 @@ export async function initializeLsp(
   toolRegistry: ReturnType<typeof createDefaultToolRegistry>,
 ): Promise<ReturnType<typeof createLspManager>> {
   // Polyglot: the multi-language manager routes each file to its matching
-  // server (typescript-language-server / pyright / gopls / rust-analyzer /
-  // clangd / jdtls), lazily spawning installed ones on first use.
+  // server (the LSP_SERVERS registry in lsp/server-registry.ts — TS/Python/Go/
+  // Rust/C/C++/Java/C#/Kotlin/Swift/PHP/Ruby/… 20+ languages), lazily spawning
+  // the installed ones on first use.
   const lspManager = createMultiLspManager(cwd)
 
   try {
@@ -1403,7 +1425,16 @@ export function resolveProviderForModel(ctx: Pick<BootstrapContext, 'config' | '
 
   for (const [provName, prov] of Object.entries(ctx.config.provider.providers)) {
     if (providerFilter && provName !== providerFilter) continue
-    const found = prov.models.find(m => m.id === modelRef)
+    // 上面注释承诺的这个 form 是「provider:modelId / provider:alias」——所以末段也经别名表
+    // 归一再比（与 provider-keys.findModelOwner、main.ts 的解析同一口径）。此前只做精确比，
+    // `/model deepseek:v4-flash` 这类短名一律落空，表现为 "not found in any provider" 的
+    // 硬报错，而不是静默回退。精确命中优先、归一补位——别名 key 可能是池内某模型的真实 id。
+    // 池子同样取契约层（keys 池并集）：本函数是 /model 切换与 startup resume 的入口，
+    // 只读顶层快照会让「只在 key 池里」的模型永远解析不到。
+    const contractPool = contractModels(prov)
+    const wanted = canonicalizeModelId(modelRef)
+    const found = contractPool.find(m => m.id === modelRef)
+      ?? (wanted !== modelRef ? contractPool.find(m => m.id === wanted) : undefined)
     if (!found) continue
     let provider = ctx.provider
     let apiKey = ctx.apiKey

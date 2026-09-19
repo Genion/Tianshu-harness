@@ -88,7 +88,7 @@ describe('probeProvider', () => {
         'tianshu-probe',
         'name 层兜底：本地/中转 baseUrl 不匹配 host 规则时仍要发会话头',
       )
-      assert.match(String(headers['user-agent'] ?? ''), /^tianshu-tui\//)
+      assert.match(String(headers['user-agent'] ?? ''), /^tianshu-harness\//)
     }
     await server.close()
     server = undefined
