@@ -297,7 +297,7 @@ node dist/cli/entry.js
 
 如果天枢对你有用，欢迎随缘打赏——这只是一杯咖啡，不是合同。赞助不会改变 issue 优先级，也不会影响功能排期。
 
-<img src="docs/brand/assets/wechat-pay.jpg" width="240" alt="微信支付">
+<img src="docs/brand/assets/wechat-donate.png" width="240" alt="微信支付">
 
 
 
