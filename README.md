@@ -271,7 +271,7 @@ node dist/cli/entry.js
 
 ## ✨ 贡献者
 
-感谢所有贡献者——项目创建者与核心开发 [@huiliyi37](https://github.com/huiliyi37)；完整名单（17 位外部贡献者 / 89 个 PR）见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。外部 PR 经「收编」流程合入后，作者署名以 `Co-authored-by` 计入贡献者图谱（`scripts/credit-contributors.sh` 自动落账）：
+感谢所有贡献者——项目创建者与核心开发 [@banxia](https://github.com/banxia)；完整名单（17 位外部贡献者 / 89 个 PR）见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。外部 PR 经「收编」流程合入后，作者署名以 `Co-authored-by` 计入贡献者图谱（`scripts/credit-contributors.sh` 自动落账）：
 
 <p>
 <a href="https://github.com/HarriethWiKk"><img src="https://github.com/HarriethWiKk.png?size=100" width="50" height="50" alt="HarriethWiKk" title="HarriethWiKk" /></a>
@@ -296,6 +296,8 @@ node dist/cli/entry.js
 ## ☕ 赞助支持
 
 如果天枢对你有用，欢迎随缘打赏——这只是一杯咖啡，不是合同。赞助不会改变 issue 优先级，也不会影响功能排期。
+
+<img src="docs/brand/assets/wechat-pay.jpg" width="240" alt="微信支付">
 
 
 
