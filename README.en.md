@@ -1049,9 +1049,22 @@ Write only the fields you want to override; defaults are deep-merged. Full schem
 - **Bug reports / feature requests** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **Security vulnerabilities** → [Report privately](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new) (do not open a public issue)
 - **Contributing** → See [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Support guide** → See [SUPPORT.md](SUPPORT.md)
+- **Support guide** → See SUPPORT.md
+- **WeChat group** → 「天枢 harness 交流群」 — scan the QR code below to join (QR codes expire every 7 days; leave a note in Discussions once expired):
+
+<img src="docs/brand/assets/wechat-group-qr.png" width="280" alt="Tianshu Harness WeChat group QR code">
 
 > Note: a maintainer needs to enable Discussions in `Settings → General → Discussions` first.
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#huiliyi37/tianshu-harness&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" width="700" />
+  </picture>
+</a>
 
 ## ☕ Support
 

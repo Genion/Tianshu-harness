@@ -1211,6 +1211,16 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 
 > PR을 통한 코드 기여를 환영합니다. 자세한 내용은 CONTRIBUTING.md를 참조하세요.
 
+## ⭐ 스타 히스토리
+
+<a href="https://star-history.com/#huiliyi37/tianshu-harness&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" width="700" />
+  </picture>
+</a>
+
 ## ☕ 후원
 
 天枢가 유용했다면 기분 내키는 대로 후원해 주셔도 좋습니다——이것은 한 잔의 커피일 뿐, 계약이 아닙니다. 후원이 issue 우선순위를 바꾸거나 기능 일정에 영향을 주지는 않습니다.

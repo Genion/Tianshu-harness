@@ -335,6 +335,16 @@ node dist/cli/entry.js
 <a href="https://github.com/EarthxxRhythm"><img src="https://github.com/EarthxxRhythm.png?size=100" width="50" height="50" alt="EarthxxRhythm" title="EarthxxRhythm" /></a>
 </p>
 
+## ⭐ Star History
+
+<a href="https://star-history.com/#huiliyi37/tianshu-harness&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=huiliyi37/tianshu-harness&type=Date" width="700" />
+  </picture>
+</a>
+
 ## ☕ 赞助支持
 
 如果天枢对你有用，欢迎随缘打赏——这只是一杯咖啡，不是合同。赞助不会改变 issue 优先级，也不会影响功能排期。
