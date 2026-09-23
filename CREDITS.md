@@ -86,3 +86,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #15 docs(readme): renumber sections to fix duplicate '### 3.' heading（CLOSED）
 - #13 Feat rivet shell completions（MERGED）
 - #12 feat(completions): add fish and Windows-shell completion scripts（CLOSED）
+
+## @Wanming08
+
+署名：Wanming08 <Wanming08@users.noreply.github.com>
+
+- #152 fix(mcp): guard OAuth token requests against SSRF（CLOSED）
