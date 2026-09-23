@@ -53,3 +53,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #5 tui: overlay subtle style overhaul — remove emojis, compact layout, thin borders（CLOSED）
 - #2 fix: 修复 FallbackStreamClient 中死代码导致的 fallback 失效（CLOSED）
 - #1 Wsl兼容问题（CLOSED）
+
+## @KinoGao
+
+署名：KinoGao <71637313+KinoGao@users.noreply.github.com>
+
+- #26 feat: 完善 Galaxy 与 Starflow 的 EP-DP 编排（CLOSED）
