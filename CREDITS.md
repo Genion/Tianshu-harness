@@ -92,3 +92,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：Wanming08 <Wanming08@users.noreply.github.com>
 
 - #152 fix(mcp): guard OAuth token requests against SSRF（CLOSED）
+
+## @jian-in
+
+署名：jian-in <267224531+jian-in@users.noreply.github.com>
+
+- #201 feat(mcp): add health check and circuit breaker for MCP servers（CLOSED）
