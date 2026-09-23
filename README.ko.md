@@ -1177,7 +1177,7 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 |--------|----------|
 | [@huiliyi37](https://github.com/huiliyi37) | 프로젝트 창시자 · 핵심 개발 |
 
-전체 목록（외부 기여자 20명 / 122 PR）→ CONTRIBUTORS.md
+전체 목록（외부 기여자 22명 / 145 PR）→ CONTRIBUTORS.md
 
 외부 PR은「이식(收编)」절차로 병합되며, 저자 서명은 `Co-authored-by`로 기여자 그래프에
 반영됩니다（scripts/credit-contributors.sh 가 자동 기록）——기여자 월（전체 목록은 CONTRIBUTORS.md）:
@@ -1200,6 +1200,11 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 <a href="https://github.com/nzz0991999-ai"><img src="https://github.com/nzz0991999-ai.png?size=100" width="50" height="50" alt="nzz0991999-ai" title="nzz0991999-ai" /></a>
 <a href="https://github.com/L4XB"><img src="https://github.com/L4XB.png?size=100" width="50" height="50" alt="L4XB" title="L4XB" /></a>
 <a href="https://github.com/Wanming08"><img src="https://github.com/Wanming08.png?size=100" width="50" height="50" alt="Wanming08" title="Wanming08" /></a>
+<a href="https://github.com/lei454577-web"><img src="https://github.com/lei454577-web.png?size=100" width="50" height="50" alt="lei454577-web" title="lei454577-web" /></a>
+<a href="https://github.com/jian-in"><img src="https://github.com/jian-in.png?size=100" width="50" height="50" alt="jian-in" title="jian-in" /></a>
+<a href="https://github.com/sky-mirrors"><img src="https://github.com/sky-mirrors.png?size=100" width="50" height="50" alt="sky-mirrors" title="sky-mirrors" /></a>
+<a href="https://github.com/moyan3691"><img src="https://github.com/moyan3691.png?size=100" width="50" height="50" alt="moyan3691" title="moyan3691" /></a>
+<a href="https://github.com/EarthxxRhythm"><img src="https://github.com/EarthxxRhythm.png?size=100" width="50" height="50" alt="EarthxxRhythm" title="EarthxxRhythm" /></a>
 </p>
 
 > PR을 통한 코드 기여를 환영합니다. 자세한 내용은 CONTRIBUTING.md를 참조하세요.

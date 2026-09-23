@@ -1067,7 +1067,7 @@ Thank you to everyone who has contributed to Tianshu (ordered by first contribut
 |-------------|---------------|
 | [@huiliyi37](https://github.com/huiliyi37) | Project creator · Core development |
 
-Full list (20 external contributors / 122 PRs) → CONTRIBUTORS.md.
+Full list (22 external contributors / 145 PRs) → CONTRIBUTORS.md.
 
 External PRs land via a "port" flow; authorship is credited with `Co-authored-by`
 trailers (auto-recorded by scripts/credit-contributors.sh) — contributor wall (full list in CONTRIBUTORS.md):
@@ -1090,6 +1090,11 @@ trailers (auto-recorded by scripts/credit-contributors.sh) — contributor wall 
 <a href="https://github.com/nzz0991999-ai"><img src="https://github.com/nzz0991999-ai.png?size=100" width="50" height="50" alt="nzz0991999-ai" title="nzz0991999-ai" /></a>
 <a href="https://github.com/L4XB"><img src="https://github.com/L4XB.png?size=100" width="50" height="50" alt="L4XB" title="L4XB" /></a>
 <a href="https://github.com/Wanming08"><img src="https://github.com/Wanming08.png?size=100" width="50" height="50" alt="Wanming08" title="Wanming08" /></a>
+<a href="https://github.com/lei454577-web"><img src="https://github.com/lei454577-web.png?size=100" width="50" height="50" alt="lei454577-web" title="lei454577-web" /></a>
+<a href="https://github.com/jian-in"><img src="https://github.com/jian-in.png?size=100" width="50" height="50" alt="jian-in" title="jian-in" /></a>
+<a href="https://github.com/sky-mirrors"><img src="https://github.com/sky-mirrors.png?size=100" width="50" height="50" alt="sky-mirrors" title="sky-mirrors" /></a>
+<a href="https://github.com/moyan3691"><img src="https://github.com/moyan3691.png?size=100" width="50" height="50" alt="moyan3691" title="moyan3691" /></a>
+<a href="https://github.com/EarthxxRhythm"><img src="https://github.com/EarthxxRhythm.png?size=100" width="50" height="50" alt="EarthxxRhythm" title="EarthxxRhythm" /></a>
 </p>
 
 > Contributions are welcome — see CONTRIBUTING.md.
