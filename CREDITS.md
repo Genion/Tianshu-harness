@@ -68,3 +68,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：L4XB <103962359+L4XB@users.noreply.github.com>
 
 - #109 fix(browser): pin the chromium install to the embedded playwright-core version（CLOSED）
+
+## @LinHoMo
+
+署名：LinHoMo <135706031+LinHoMo@users.noreply.github.com>
+
+- #143 chore: 清理悬空 probe:* 脚本、废弃依赖 parquetjs 与一次性脚本残留（CLOSED）
