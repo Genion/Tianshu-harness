@@ -169,3 +169,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：wangxx-yu <270384808+wangxx-yu@users.noreply.github.com>
 
 - #6 fix: rescue abandoned tool batch after abort to prevent write_file ghost-abort（CLOSED）
+
+## @yeshilei-QWQ
+
+署名：yeshilei-QWQ <89763253+yeshilei-QWQ@users.noreply.github.com>
+
+- #261 feat(schedule): 定时任务可显式声明审批档位（issue #259）（OPEN）
