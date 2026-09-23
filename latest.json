@@ -10,10 +10,6 @@
     "darwin-x86_64": {
       "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.25.0/Tianshu_3.25.0_x64.app.tar.gz",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1o1eFg2L05JZmJSUE9PT2FYNnlxbW5CUVZiUHYzMTMvKzE2MUtMV2Judk1wM1ZsVFgzODFieEp2Y0pxQnI0WjhOcUN5azM0TTRBV1VqK1VOUVFCcVFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMTU4ODM2CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CklGeDB6NHg3SHFzQlZpbkcraU5xZ1M5V2dtaU5oWms3ekk3eExUcEQwZTBheCtjeC9INUtGaERrM2hBSUhoYkozbUt4OWRYRU94d3V1TTUzZzZxVENBPT0K"
-    },
-    "windows-x86_64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.25.0/Tianshu_3.25.0_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1RTQ0Y0aUU4dlNEUStlMUpGRUVWcmF6cG5LbFpKSHM3aGI5WXRaZGN4c2g1ZVhvYjltS0VvSkI4ZDROaTdEck9ydzhvVTBTSGk0R1Nqby96M2tSWXdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMTYyNTU2CWZpbGU6VGlhbnNodV8zLjI1LjBfeDY0LXNldHVwLmV4ZQpHTnNpOXRSNERjUklIUmNnc0JvOWtyUzFnYXFXVExXa0tCL0RTNmlWNUI5V2FiamhIRkkzU3ZvTVJnVUhNMUd0b0FUV3F0NFNlMnZ2NWxMdkRPbFlCQT09Cg=="
     }
   }
 }
