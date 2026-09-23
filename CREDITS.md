@@ -175,3 +175,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：yeshilei-QWQ <89763253+yeshilei-QWQ@users.noreply.github.com>
 
 - #261 feat(schedule): 定时任务可显式声明审批档位（issue #259）（OPEN）
+- #257 feat(bash): 执行期让出——命中注入签名的命令跑到一半用户接管即终止（issue #235）（CLOSED）
