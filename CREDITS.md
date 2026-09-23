@@ -16,3 +16,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 
 格式：`## @login` 小节 + `- #<PR> <标题>（状态）` 行，由脚本自动追加；已有行不要手工改
 （要调整措辞就改脚本模板后重跑）。
+
+## @EarthxxRhythm
+
+署名：EarthxxRhythm <68267496+EarthxxRhythm@users.noreply.github.com>
+
+- #234 fix(prompt): 未受信项目的 AGENTS.md / .rivet.md 不再注入（issue #218）（CLOSED）
