@@ -30,6 +30,7 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -1155,6 +1156,7 @@ tianshu logs open desktop            # sidecar ログディレクトリを開く
 ## 🤝 コミュニティとサポート
 
 - **使い方の質問 / ディスカッション** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Discord コミュニティ** → [「天枢 tianshu-harness 官方交流群」に参加](https://discord.gg/XjWTATCHB)
 - **バグ報告 / 機能リクエスト** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **セキュリティ脆弱性** → [プライベート報告](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new)（公開 issue を開かないでください）
 - **コードへのコントリビュート** → [CONTRIBUTING.md](CONTRIBUTING.md) を参照

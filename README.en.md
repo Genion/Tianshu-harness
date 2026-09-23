@@ -26,6 +26,7 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -1044,6 +1045,7 @@ Write only the fields you want to override; defaults are deep-merged. Full schem
 ## 🤝 Community & Support
 
 - **Usage questions / discussions** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Discord community** → [Join the Tianshu Harness Discord](https://discord.gg/XjWTATCHB)
 - **Bug reports / feature requests** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **Security vulnerabilities** → [Report privately](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new) (do not open a public issue)
 - **Contributing** → See [CONTRIBUTING.md](CONTRIBUTING.md)

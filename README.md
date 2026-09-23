@@ -30,6 +30,7 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 ---
@@ -294,6 +295,7 @@ node dist/cli/entry.js
 ## 🤝 社区与支持
 
 - **使用问题 / 讨论** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Discord 交流群** → [加入「天枢 tianshu-harness 官方交流群」](https://discord.gg/XjWTATCHB)（邀请链接，不受 7 天限制）
 - **Bug 报告 / 功能请求** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)（附 `tianshu logs --json` 输出可加速定位）
 - **贡献代码** → [CONTRIBUTING.md](CONTRIBUTING.md) · **求助指南** → [SUPPORT.md](SUPPORT.md)
 - **微信交流群** → 「天枢 harness 交流群」，扫码加入（二维码 7 天有效，过期请在 Discussions 留言补码）：
