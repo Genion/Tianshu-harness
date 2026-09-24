@@ -6,6 +6,7 @@ import type { ContentBlock, Message } from '../api/types.js'
 import { normalizeOaiMessage, normalizeOaiMessages } from '../api/oai-types.js'
 import type { OaiAssistantMessage, OaiMessage, OaiToolCall, OaiToolMessage } from '../api/oai-types.js'
 import { stableStringify } from '../api/stable-json.js'
+import { JSON_VALUE_KEEP_RATIO, MAX_SESSION_MESSAGE_JSON_CHARS } from '../compact/constants.js'
 import { parseFrozenSnapshotData, type FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
 
 function legacyMessageToOaiMessages(message: Message): OaiMessage[] {
@@ -75,8 +76,6 @@ function ensureDir(dir: string): void {
   }
 }
 
-export const MAX_SESSION_MESSAGE_JSON_CHARS = 100_000
-
 function truncateString(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value
   const marker = `\n<session-message-truncated original_chars="${value.length}" kept_chars="${maxChars}" />`
@@ -117,7 +116,7 @@ function serializeSessionJsonValue<T>(message: T, maxChars: number, fallback: ()
   let json = JSON.stringify(message)
   if (json.length <= maxChars) return json
 
-  const capped = capJsonValue(message, Math.max(1_000, Math.floor(maxChars * 0.8))) as T
+  const capped = capJsonValue(message, Math.max(1_000, Math.floor(maxChars * JSON_VALUE_KEEP_RATIO))) as T
   json = JSON.stringify(capped)
   if (json.length <= maxChars) return json
 

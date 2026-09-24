@@ -41,7 +41,7 @@ import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
 import { existsSync } from 'node:fs'
-import { CronScheduler, setActiveScheduler } from './cron-scheduler.js'
+import { CronScheduler, setActiveScheduler, setUnattendedAutomationGate } from './cron-scheduler.js'
 import { CronWiring } from './cron-wiring.js'
 import { buildMcpRoutes } from './mcp-api.js'
 import { buildPluginRoutes } from './plugin-api.js'
@@ -1148,6 +1148,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     const rivetDir = desktopDir()
     scheduler = new CronScheduler({ schedulePath: join(rivetDir, 'scheduled_tasks.json') })
     setActiveScheduler(scheduler)
+    setUnattendedAutomationGate(() => isProFeatureEnabled(ctx.config, 'unattendedAutomation'))
     const registry = new TaskRegistry({
       taskStore: new JsonTaskStore(join(rivetDir, 'tasks')),
       // 阶段 4：任务创建 / 状态转换 → 推送通道失效提示（替代 /tasks 5s 轮询）。
@@ -1166,8 +1167,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
       // 付费版 v1 · T5 — 非 always-review / 含 computer_use 的定时任务归 Pro。
       // 用启动时的 ctx.config：桌面端 Pro 状态经签名凭证注入（激活/吊销后要求
       // 重启 sidecar），CLI 走配置软 gate。
-      isUnattendedAutomationEnabled: () =>
-        isProFeatureEnabled(ctx.config, 'unattendedAutomation'),
+      isUnattendedAutomationEnabled: () => isProFeatureEnabled(ctx.config, 'unattendedAutomation'),
     }))
     // Task audit/history API (execution records for the automations dashboard).
     // The scheduler + task-registry share this desktop dir, so events land in

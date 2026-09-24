@@ -251,9 +251,11 @@ export async function withStructuredRetry<T>(
       //   1. overrides[category].maxRetries → 该类别显式值（仍受显式 maxTotalRetries 夹取）
       //   2. 显式 maxTotalRetries → 直接生效（抬升分类器默认，消除「调了不生效」）
       //   3. 两者都无 → 分类器默认（历史行为）
-      // stripImages / preserveReasoning 类别带一次性语义（wire 形态只改一次）：
-      // 显式全局值只允许收紧——否则「一次改形态是否奏效」会被无限重试掩盖。
+      // stripImages / preserveReasoning / reasoningRepeatCorrect 类别带一次性语义
+      // （wire 形态只改一次）：显式全局值只允许收紧——否则「一次改形态是否奏效」
+      // 会被无限重试掩盖。
       const oneShot = classified.stripImages === true || classified.preserveReasoning === true
+        || classified.reasoningRepeatCorrect === true
       const override = policy?.overrides?.[classified.category]
       let effectiveMax: number
       if (override?.maxRetries !== undefined) {

@@ -27,6 +27,7 @@ import { shouldRunDiagnostics, filterDiagnosticsForEdit } from '../lsp/client.js
 import type { LspManager } from '../lsp/manager.js'
 import { startTraceEvent, finishTraceEvent, fingerprintToolCall, fingerprintToolClass, recordToolFingerprint, recordTraceEvent, offendingFingerprints, getDoomLoopThresholds } from './trace-store.js'
 import { summarizeRepairTelemetry } from './repair-pipeline.js'
+import { extractErrorHead, generateToolSummary } from './tool-summary.js'
 import type { InterventionLevel } from './prediction-error.js'
 import { assessToolRisk, CONFIDENCE_THRESHOLDS, hasOutOfWorkspaceWriteTarget, isDestructiveGitAction, isSafeWriteOnly, requiresBashWriteApproval, requiresUnconditionalApproval } from './approval-risk.js'
 import type { Sensorium } from './sensorium.js'
@@ -628,76 +629,6 @@ async function artifactIntercept(
  }
 }
 
-/** Extract the most diagnostic lines from error output (max ~600 chars). */
-function extractErrorHead(content: string): string {
-  const lines = content.split('\n')
-  // Prioritize lines with error/fail keywords — use word boundaries to avoid matching identifiers like errorHandler
-  const errorLines = lines.filter(l => /\b(?:error|Error|FAIL|AssertionError|TypeError|ReferenceError)\b|expect\(/.test(l))
-  if (errorLines.length > 0) {
-    return errorLines.slice(0, 8).map(l => l.trim().slice(0, 120)).join('\n')
- }
-  // Fallback: last 8 lines (often contain the summary)
-  return lines.slice(-8).map(l => l.trim().slice(0, 120)).join('\n')
-}
-
-function generateToolSummary(content: string, toolName: string, input: Record<string, unknown>): string {
-  const lines = content.split('\n')
-  const lineCount = lines.length
-  const charCount = content.length
-
-  switch (toolName) {
-    case 'run_tests': {
-      // Extract test summary from content
-      const testLine = lines.find(l => /tests?\s*(?:pass|passed|fail|failed)|total/i.test(l))
-        ?? lines.find(l => /\d+\s+pass/i.test(l))
-      const errorLines = lines.filter(l => /error|Error|FAIL/i.test(l)).slice(0, 2)
-      const parts = [`[run_tests] ${lineCount} lines.`]
-      if (testLine) parts.push(testLine.trim())
-      if (errorLines.length > 0) parts.push(`Errors: ${errorLines.map(l => l.trim().slice(0, 60)).join('; ')}`)
-      return parts.join(' ')
-   }
-    case 'diff': {
-      const files = lines.filter(l => l.startsWith('diff --git')).map(l => {
-        const m = l.match(/b\/(.+)$/)
-        return m ? m[1] : ''
-     }).filter(Boolean)
-      return `[diff] ${files.length} files changed, ${lineCount} lines. Files: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5})` : ''}`
-   }
-    case 'glob': {
-      const matches = lines.filter(l => l.trim())
-      const pattern = typeof input.pattern === 'string' ? input.pattern : '?'
-      return `[glob "${pattern}"] ${matches.length} files found. First: ${matches.slice(0, 3).join(', ')}${matches.length > 3 ? ` (+${matches.length - 3})` : ''}`
-   }
-    case 'web_fetch': {
-      const url = typeof input.url === 'string' ? input.url : '?'
-      return `[web_fetch ${url}] ${charCount} chars, ${lineCount} lines fetched.`
-   }
-    case 'repo_map': {
-      return `[repo_map] ${lineCount} lines. ${lines.find(l => /\d+ files/.test(l))?.trim() ?? `${lineCount} entries`}`
-   }
-    case 'inspect_project': {
-      return `[inspect_project] ${lineCount} lines of project analysis.`
-   }
-    case 'bash': {
-      const cmd = typeof input.command === 'string' ? input.command.slice(0, 80) : '?'
-      // Detect test/typecheck output
-      if (/\b(tsc|typecheck|type-check)\b/.test(cmd)) {
-        const errorCount = lines.filter(l => /error TS\d+/.test(l)).length
-        return `[bash typecheck] ${errorCount} errors, ${lineCount} lines. cmd: ${cmd}`
-     }
-      if (/\b(test|jest|vitest|mocha|pytest)\b/.test(cmd)) {
-        const passLine = lines.find(l => /pass|fail|tests?\s+\d+/i.test(l))?.trim().slice(0, 80) ?? ''
-        return `[bash test] ${lineCount} lines. ${passLine} cmd: ${cmd}`
-     }
-      return `[bash] ${charCount} chars, ${lineCount} lines. cmd: ${cmd}`
-   }
-    default: {
-      // Generic: first meaningful line + stats
-      const firstLine = lines.find(l => l.trim().length > 10)?.trim().slice(0, 80) ?? ''
-      return `[${toolName}] ${charCount} chars, ${lineCount} lines. ${firstLine}`
-   }
- }
-}
 
 /**
  * Best-effort HEAD probe for the deliver_task abort path. Never throws;

@@ -25,6 +25,28 @@
  */
 export const PROTOCOL_VERSION = 1
 
+/**
+ * 运行时能力表 —— `GET /health` 的 `capabilities` 字段（issue #266 的环境面）。
+ *
+ * 为什么不是「版本号 ≥ x」：桌面端与 sidecar 是**可分开升级**的两个实体（Windows
+ * 分头打包、updater 撤包、远程 sidecar 都会让两边错配），而版本阈值要靠前端硬编码
+ * 「哪个版本引入了哪个接口」——猜错的症状就是「点了没反应」。改成运行时**自报**它
+ * 能处理什么：前端只问能力，不问版本。
+ *
+ * 加性字段：新增能力**不** bump PROTOCOL_VERSION；老运行时缺 `capabilities` 时，
+ * 前端回退到版本比较（见 desktop/src/lib/runtime-capabilities.ts 的
+ * SCHEDULE_PATCH_MIN_VERSION）。本文件同时被桌面端 type-only 引用，两侧不会漂移。
+ */
+export interface RuntimeCapabilities {
+  /** `PATCH /schedule/:id` —— 自动化定义的原地更新（#236 起，见 3.24.0）。 */
+  schedulePatch: boolean
+}
+
+/** 本构建实际具备的能力：加能力 = 这里加一行 `true`。 */
+export const RUNTIME_CAPABILITIES: RuntimeCapabilities = {
+  schedulePatch: true,
+}
+
 export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted' | 'interrupted'
 
 /**

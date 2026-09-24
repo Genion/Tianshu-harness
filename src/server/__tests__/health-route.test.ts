@@ -49,6 +49,17 @@ test('GET /health reports version, uptime and counts', async () => {
   assert.equal(body.registryOk, true)
 })
 
+test('GET /health 自报 capabilities —— 前端据此判断能力，而不是靠版本号猜（issue #266）', async () => {
+  const { router } = setup()
+  const body = (await router('GET', '/health', {}, AUTH)).body as { capabilities?: { schedulePatch?: boolean } }
+  assert.equal(body.capabilities?.schedulePatch, true, '支持 PATCH /schedule/:id 的运行时要自报')
+
+  // 匿名探测（无 token）保持最小体：rich fields 是「用户正在跑 agent」的活动侧信道，
+  // 能力表虽然不敏感，但也没有理由扩大无鉴权响应面。
+  const anon = (await router('GET', '/health', {}, {})).body as Record<string, unknown>
+  assert.ok(!('capabilities' in anon), 'anonymous probe stays minimal')
+})
+
 test('GET /health surfaces registry readiness when a probe is wired', async () => {
   const manager = new RuntimeSessionManager({ createAgent: () => new NoopAgent() })
   let ready = false

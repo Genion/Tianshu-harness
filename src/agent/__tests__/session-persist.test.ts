@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { MAX_SESSION_MESSAGE_JSON_CHARS, SessionPersist, evictOldSessionsInternal, getSessionDir, projectSlug, serializeSessionMessage, formatExitSummary, shouldAutoWriteHandoff } from '../session-persist.js'
+import { SessionPersist, evictOldSessionsInternal, getSessionDir, projectSlug, serializeSessionMessage, serializeOaiSessionMessage, formatExitSummary, shouldAutoWriteHandoff } from '../session-persist.js'
+import { INLINE_TOOL_RESULT_MAX_CHARS, MAX_SESSION_MESSAGE_JSON_CHARS } from '../../compact/constants.js'
 import type { OaiMessage } from '../../api/oai-types.js'
 import { appendChecksum } from '../checksum.js'
 import { decodeTranscriptText, encodeBatch } from '../session-transcript-codec.js'
@@ -59,6 +60,27 @@ describe('SessionPersist', () => {
 
     assert.ok(serialized.length <= MAX_SESSION_MESSAGE_JSON_CHARS + 512)
     assert.match(serialized, /session-message-truncated/)
+  })
+
+  it('落盘上限必须容得下内存侧允许的单条工具结果（不二次削小）', () => {
+    // 回归（2026-09-24）：内存裁顶 50K→120K 后，落盘侧仍是 100K，且 capJsonValue
+    // 按 floor(maxChars * 0.8) 逐字符串截——于是 (80K, 120K] 的单条工具结果在
+    // transcript 里被削到 ~80K 并留下 session-message-truncated。会话恢复/重放时
+    // 模型看到的历史与当时真正发给它的内容不一致。该区间在内存裁顶 50K 时代
+    // 不可达，是 120K 放开后才出现的。
+    const content = Array.from({ length: 1600 }, (_, i) => `line ${i}: ${'x'.repeat(60)}`).join('\n')
+    assert.ok(
+      content.length > 100_000 && content.length <= INLINE_TOOL_RESULT_MAX_CHARS,
+      `夹具必须落在 (落盘旧上限 100K, 内存上限 ${INLINE_TOOL_RESULT_MAX_CHARS}] 区间内（实得 ${content.length}）`,
+    )
+
+    const serialized = serializeOaiSessionMessage({ role: 'tool', tool_call_id: 'call-1', content })
+
+    assert.doesNotMatch(serialized, /session-message-truncated/, '内存允许的内容落盘时不该被截')
+    // 逐字节比对：序列化文本里换行是转义的，必须解析后再比，否则断言本身失效。
+    const parsed = JSON.parse(serialized) as { role: string; content: string; tool_call_id?: string }
+    assert.equal(parsed.tool_call_id, 'call-1')
+    assert.equal(parsed.content, content, '整条内容应原样落盘（含尾部）')
   })
 })
 

@@ -9,9 +9,10 @@ import { fetchWithTimeout } from './fetch-timeout.js'
 import { withStructuredRetry } from './retry-engine.js'
 import { parseRetryAfterMs } from './error-classifier.js'
 import { resolveWireEffort } from './provider.js'
-import { ReasoningRepetitionGuard } from './reasoning-repetition.js'
+import { ReasoningRepetitionGuard, REASONING_REPETITION_CORRECTION } from './reasoning-repetition.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
-import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS, MAX_JSON_BODY_BYTES } from '../utils/sanitize.js'
+import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS } from '../utils/sanitize.js'
+import { parseOpenAIError } from './error-hints.js'
 import { enforceRequestBodyLimit } from './request-body-guard.js'
 import { stableStringify } from './stable-json.js'
 import { RequestInvariantMonitor } from './request-invariant.js'
@@ -764,6 +765,12 @@ export class OpenAIClient implements StreamClient {
     let preserveReasoningRequested = false
     let preserveReasoningApplied = false
 
+    // reasoning_repetition 恢复状态（2026-09-24，issue #260）：思考退化成复读短句时，
+    // 先**纠正重试一次**——丢掉那段退化推理（绝不回放，回放会强化循环）+ 尾部附一句
+    // 纠正指令；第二次仍命中才冒泡成终态错误。判定阈值见 reasoning-repetition.ts。
+    let repeatCorrectionRequested = false
+    let repeatCorrectionApplied = false
+
     // Size-scaled first-byte budget (B): estimate prompt size once (stable across
     // retries; the per-retry reasoning re-injection is negligible) and derive a
     // first-byte timeout that grows with input so large cold-context prefills are
@@ -820,6 +827,16 @@ export class OpenAIClient implements StreamClient {
           // 否则「模型没理我的截图」会被当成模型变笨。
           callbacks.onImageStripped?.({ removedCount: stripped.removedCount })
         }
+      }
+
+      // 复读纠正重发（2026-09-24，issue #260）：不清掉那段退化推理就等于把同一个
+      // 循环再喂一遍（故 reasoningRef 置空 + 历史里本来就只存正常轮），尾部附一句
+      // 纠正让模型换思路。只改本次 attempt 的 wire 副本，不进口历史。
+      if (repeatCorrectionRequested && !repeatCorrectionApplied) {
+        repeatCorrectionApplied = true
+        reasoningRef.content = ''
+        wireMessages = [...wireMessages, { role: 'user', content: REASONING_REPETITION_CORRECTION }]
+        debugLog('[openai-client] reasoning_repetition 自愈：丢弃退化推理 + 尾部纠正指令，重发一次')
       }
 
       let effectiveBody = body
@@ -965,6 +982,12 @@ export class OpenAIClient implements StreamClient {
         // 用保留思考内容的历史重发（重建点见 fn 内的 wireMessages）。
         if (info.classified.category === 'reasoning_echo') {
           preserveReasoningRequested = true
+        }
+        // reasoning_repetition 分类 = 上一次尝试的思考退化成复读：下一次 attempt
+        // 丢掉那段退化推理、尾部附纠正指令重发（补丁点见 fn 内的 wireMessages）。
+        // 只在这里置位——分类器给这个类别带的就是「一次性」语义（maxRetries 1）。
+        if (info.classified.category === 'reasoning_repetition') {
+          repeatCorrectionRequested = true
         }
       },
     })
@@ -1711,77 +1734,4 @@ function mapFinishReason(reason: string): string {
   }
 }
 
-export interface ApiErrorProviderContext {
-  /** Provider name for feature gating (e.g. 'deepseek', 'glm') */
-  providerName?: string
-  baseUrl?: string
-  /** Env var holding the API key — named in 401/403 hints so users know where to look. */
-  apiKeyEnv?: string
-}
-
-/**
- * 可识别错误的行动指引。原始报错（如 "Insufficient Balance"）只陈述现象，
- * 用户得自己猜是哪家的账户、去哪充值——在报错后追加一行中文提示，直接给
- * 结论：哪家、余额不足、充值入口、临时退路（/model 换 provider）。
- */
-function apiErrorHint(code: string, message: string, provider?: ApiErrorProviderContext): string {
-  const probe = `${code} ${typeof message === 'string' ? message : ''}`
-  // 请求体被判为非法 JSON（provider 网关的 serde 报错原样透传，如
-  // "Failed to parse the request body as JSON: messages[N].content unexpected end
-  // of hex escape"）：这是**我们发出去的体**在上游被按字节切断，不是模型、不是
-  // 密钥、也不是余额问题。用户看到的只是一句英文解析错误——给结论 + 出路。
-  if (/parse the request body|unexpected end of hex escape|as JSON:|invalid json/i.test(probe)) {
-    const knob = provider?.providerName
-      ? `provider.providers.${provider.providerName}.maxBodyBytes`
-      : 'provider.providers.<name>.maxBodyBytes'
-    return (
-      '\n提示：请求体被上游判为非法 JSON（多为对话体量超限被按字节截断）。用 /compact 压缩本会话或新开会话继续；' +
-      '若 baseUrl 走第三方中转，中转常有更小的 body 上限。发送前体积护栏默认关闭——可在该 provider 配置里设 ' +
-      `${knob}（字节，如 ${MAX_JSON_BODY_BYTES}）启用：超限时自动截断历史工具输出，避免这类 400。`
-    )
-  }
-  if (!/insufficient[ _-]?(balance|quota)|余额不足|额度不足/i.test(probe)) return ''
-
-  const where = `${provider?.providerName ?? ''} ${provider?.baseUrl ?? ''}`.toLowerCase()
-  const BILLING: Array<[RegExp, string, string]> = [
-    [/deepseek/, 'DeepSeek', 'https://platform.deepseek.com/top_up'],
-    [/siliconflow|硅基/, 'SiliconFlow', 'https://cloud.siliconflow.cn'],
-    [/bigmodel|zhipu|智谱|glm/, '智谱 GLM', 'https://www.bigmodel.cn'],
-    [/minimax/, 'MiniMax', 'https://platform.minimaxi.com'],
-    [/moonshot|kimi/, 'Kimi', 'https://platform.moonshot.cn'],
-  ]
-  for (const [re, name, url] of BILLING) {
-    if (re.test(where)) {
-      return `\n提示：${name} 账户余额不足，充值后重试：${url} —— 或用 /model 临时切换到其他 provider。`
-    }
-  }
-  return '\n提示：当前 provider 账户余额不足，请充值后重试，或用 /model 切换到其他 provider。'
-}
-
-/**
- * 按 HTTP 状态码追加可操作提示：401/403 指明 key 的环境变量名（用户知道
- * 去哪检查），404 指向 `rivet provider models`（核对模型 id 是否拼错/已改名）。
- */
-function statusHint(status: number, provider?: ApiErrorProviderContext): string {
-  if (status === 401 || status === 403) {
-    const envPart = provider?.apiKeyEnv
-      ? `——请检查环境变量 ${provider.apiKeyEnv} 是否已导出且未过期`
-      : '——请检查 API key 是否正确'
-    return `\n提示：鉴权失败（HTTP ${status}）${envPart}，或用 /connect 重新配置。`
-  }
-  if (status === 404) {
-    return '\n提示：404 通常是模型 id 拼错或端点路径不对——运行 `rivet provider models <provider>` 核对端点实际提供的模型 id。'
-  }
-  return ''
-}
-
-export function parseOpenAIError(status: number, body: string, provider?: ApiErrorProviderContext): string {
-  try {
-    const parsed = JSON.parse(body)
-    const code = parsed.error?.code ?? parsed.error?.type ?? `HTTP ${status}`
-    const message = parsed.error?.message ?? body
-    return `OpenAI API error (${code}): ${message}${apiErrorHint(String(code), String(message), provider)}${statusHint(status, provider)}`
-  } catch {
-    return `OpenAI API error (HTTP ${status}): ${body}${statusHint(status, provider)}`
-  }
-}
+export { parseOpenAIError, type ApiErrorProviderContext } from './error-hints.js'

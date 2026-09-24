@@ -62,6 +62,11 @@ export interface ClassifiedError {
    *  than the category default — the retry engine keeps such delays fixed
    *  (jitter only, no exponential growth; the server named the wait). */
   retryDelayFromServer?: boolean
+  /** When true, the next attempt should **drop the degenerate partial reasoning
+   *  and append a corrective instruction** instead of replaying it (replaying a
+   *  repetition loop reinforces it). One-shot like stripImages/preserveReasoning
+   *  — the corrective retry either breaks the loop or it doesn't. */
+  reasoningRepeatCorrect?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -554,9 +559,15 @@ export function classifyApiError(error: unknown): ClassifiedError {
     }
   }
   if (error instanceof ReasoningRepetitionError) {
+    // 复读退化不再一次即中止：先给一次**纠正重试**（去掉退化推理 + 附一句纠正，
+    // 见 openai-client 的 wire 补丁）。理由与代价见 reasoning-repetition.ts 的
+    // 常量注释：flash 线在长对话里成段输出重复短句是固有文风，硬停会让用户丢掉
+    // 整轮工作；而一旦回放那段退化推理，模型只会接着打转，所以纠正而非纯重发。
+    // maxRetries: 1 = 只有一次机会；第二次仍命中就直接冒泡（终态，与从前一致）。
     return {
-      retryable: false, retryDelayMs: 0, shouldReconnect: false,
-      category: 'reasoning_repetition', userMessage: error.message, maxRetries: 0,
+      retryable: true, retryDelayMs: 0, shouldReconnect: false,
+      category: 'reasoning_repetition', userMessage: error.message, maxRetries: 1,
+      reasoningRepeatCorrect: true,
     }
   }
   // Non-SSE 200 (openai-client content-type gate): the endpoint answered but
